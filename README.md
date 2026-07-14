@@ -12,8 +12,7 @@ There is already an excellent [MultiClock](https://github.com/mibus/MultiClock) 
   - [Configuration](#configuration)
   - [Contributing](#contributing)
     - [Installation](#installation)
-    - [Yarn](#yarn)
-    - [Scripts](#scripts)
+    - [Development](#development)
   - [Legal](#legal)
 
 ## How to use
@@ -34,7 +33,7 @@ There is already an excellent [MultiClock](https://github.com/mibus/MultiClock) 
 
 ## Contributing
 
--   Use prettify and eslint to lint your code.
+-   This extension is plain, unbundled GJS ESM (GNOME Shell 45+ extension format) — there is no build/bundle step. Edit `extension.js` / `timezones.js` directly.
 -   Update the readme with an example if you add or change any functionality.
 
 ### Installation
@@ -43,18 +42,16 @@ $ cd ~/.local/share/gnome-shell/extensions/
 $ git clone git@github.com:Masquerade-Circus/gnome-timezones-extension.git timezones@masquerade-circus.net
 ```
 
-### Yarn  
-This extension use [yarn](https://yarnpkg.com/) as its main ally. So use the `yarn` command to install dependencies and run the scripts.
+### Development
 
-### Scripts  
-Use the next scripts to easy the developing time: 
+The extension has no dependencies and no `package.json`/bundler — `extension.js` and `timezones.js` are loaded by GNOME Shell as-is. Useful commands while developing:
 
-- `yarn dev:source`: Use rollup to watch for changes and rebuild the extension.js file.
-- `yarn watch-log`: Keeps watching the journalctl gnome shell log. 
-- `yarn enable`: To enable the extension.
-- `yarn disable`: To disable the extension.
-- `yarn compile`: To compile the settings schemas.
-- `yarn build`: This build the source, compiles the schemas and makes the distributable zip file.
+- `journalctl -f -o cat /usr/bin/gnome-shell`: Watch the GNOME Shell log for errors.
+- `gnome-extensions enable timezones@masquerade-circus.net`: Enable the extension.
+- `gnome-extensions disable timezones@masquerade-circus.net`: Disable the extension.
+- `glib-compile-schemas schemas/`: Recompile the settings schema after editing `schemas/org.gnome.shell.extensions.timezones.gschema.xml`.
+
+On X11 you can reload the shell with Alt+F2, `r`, Enter after making changes; on Wayland you must log out/in (or use a nested shell via `dbus-run-session -- gnome-shell --nested --wayland` for testing).
 
 ## Legal
 

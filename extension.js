@@ -1,370 +1,33 @@
-var timezones = [
-  'UTC',
-  'Europe/Andorra',
-  'Asia/Dubai',
-  'Asia/Kabul',
-  'Europe/Tirane',
-  'Asia/Yerevan',
-  'Antarctica/Casey',
-  'Antarctica/Davis',
-  'Antarctica/DumontDUrville',
-  'Antarctica/Mawson',
-  'Antarctica/Palmer',
-  'Antarctica/Rothera',
-  'Antarctica/Syowa',
-  'Antarctica/Troll',
-  'Antarctica/Vostok',
-  'America/Argentina/Buenos_Aires',
-  'America/Argentina/Cordoba',
-  'America/Argentina/Salta',
-  'America/Argentina/Jujuy',
-  'America/Argentina/Tucuman',
-  'America/Argentina/Catamarca',
-  'America/Argentina/La_Rioja',
-  'America/Argentina/San_Juan',
-  'America/Argentina/Mendoza',
-  'America/Argentina/San_Luis',
-  'America/Argentina/Rio_Gallegos',
-  'America/Argentina/Ushuaia',
-  'Pacific/Pago_Pago',
-  'Europe/Vienna',
-  'Australia/Lord_Howe',
-  'Antarctica/Macquarie',
-  'Australia/Hobart',
-  'Australia/Currie',
-  'Australia/Melbourne',
-  'Australia/Sydney',
-  'Australia/Broken_Hill',
-  'Australia/Brisbane',
-  'Australia/Lindeman',
-  'Australia/Adelaide',
-  'Australia/Darwin',
-  'Australia/Perth',
-  'Australia/Eucla',
-  'Asia/Baku',
-  'America/Barbados',
-  'Asia/Dhaka',
-  'Europe/Brussels',
-  'Europe/Sofia',
-  'Atlantic/Bermuda',
-  'Asia/Brunei',
-  'America/La_Paz',
-  'America/Noronha',
-  'America/Belem',
-  'America/Fortaleza',
-  'America/Recife',
-  'America/Araguaina',
-  'America/Maceio',
-  'America/Bahia',
-  'America/Sao_Paulo',
-  'America/Campo_Grande',
-  'America/Cuiaba',
-  'America/Santarem',
-  'America/Porto_Velho',
-  'America/Boa_Vista',
-  'America/Manaus',
-  'America/Eirunepe',
-  'America/Rio_Branco',
-  'America/Nassau',
-  'Asia/Thimphu',
-  'Europe/Minsk',
-  'America/Belize',
-  'America/St_Johns',
-  'America/Halifax',
-  'America/Glace_Bay',
-  'America/Moncton',
-  'America/Goose_Bay',
-  'America/Blanc-Sablon',
-  'America/Toronto',
-  'America/Nipigon',
-  'America/Thunder_Bay',
-  'America/Iqaluit',
-  'America/Pangnirtung',
-  'America/Atikokan',
-  'America/Winnipeg',
-  'America/Rainy_River',
-  'America/Resolute',
-  'America/Rankin_Inlet',
-  'America/Regina',
-  'America/Swift_Current',
-  'America/Edmonton',
-  'America/Cambridge_Bay',
-  'America/Yellowknife',
-  'America/Inuvik',
-  'America/Creston',
-  'America/Dawson_Creek',
-  'America/Fort_Nelson',
-  'America/Vancouver',
-  'America/Whitehorse',
-  'America/Dawson',
-  'Indian/Cocos',
-  'Europe/Zurich',
-  'Africa/Abidjan',
-  'Pacific/Rarotonga',
-  'America/Santiago',
-  'America/Punta_Arenas',
-  'Pacific/Easter',
-  'Asia/Shanghai',
-  'Asia/Urumqi',
-  'America/Bogota',
-  'America/Costa_Rica',
-  'America/Havana',
-  'Atlantic/Cape_Verde',
-  'America/Curacao',
-  'Indian/Christmas',
-  'Asia/Nicosia',
-  'Asia/Famagusta',
-  'Europe/Prague',
-  'Europe/Berlin',
-  'Europe/Copenhagen',
-  'America/Santo_Domingo',
-  'Africa/Algiers',
-  'America/Guayaquil',
-  'Pacific/Galapagos',
-  'Europe/Tallinn',
-  'Africa/Cairo',
-  'Africa/El_Aaiun',
-  'Europe/Madrid',
-  'Africa/Ceuta',
-  'Atlantic/Canary',
-  'Europe/Helsinki',
-  'Pacific/Fiji',
-  'Atlantic/Stanley',
-  'Pacific/Chuuk',
-  'Pacific/Pohnpei',
-  'Pacific/Kosrae',
-  'Atlantic/Faroe',
-  'Europe/Paris',
-  'Europe/London',
-  'Asia/Tbilisi',
-  'America/Cayenne',
-  'Africa/Accra',
-  'Europe/Gibraltar',
-  'America/Godthab',
-  'America/Danmarkshavn',
-  'America/Scoresbysund',
-  'America/Thule',
-  'Europe/Athens',
-  'Atlantic/South_Georgia',
-  'America/Guatemala',
-  'Pacific/Guam',
-  'Africa/Bissau',
-  'America/Guyana',
-  'Asia/Hong_Kong',
-  'America/Tegucigalpa',
-  'America/Port-au-Prince',
-  'Europe/Budapest',
-  'Asia/Jakarta',
-  'Asia/Pontianak',
-  'Asia/Makassar',
-  'Asia/Jayapura',
-  'Europe/Dublin',
-  'Asia/Jerusalem',
-  'Asia/Kolkata',
-  'Indian/Chagos',
-  'Asia/Baghdad',
-  'Asia/Tehran',
-  'Atlantic/Reykjavik',
-  'Europe/Rome',
-  'America/Jamaica',
-  'Asia/Amman',
-  'Asia/Tokyo',
-  'Africa/Nairobi',
-  'Asia/Bishkek',
-  'Pacific/Tarawa',
-  'Pacific/Enderbury',
-  'Pacific/Kiritimati',
-  'Asia/Pyongyang',
-  'Asia/Seoul',
-  'Asia/Almaty',
-  'Asia/Qyzylorda',
-  'Asia/Qostanay', // https://bugs.chromium.org/p/chromium/issues/detail?id=928068
-  'Asia/Aqtobe',
-  'Asia/Aqtau',
-  'Asia/Atyrau',
-  'Asia/Oral',
-  'Asia/Beirut',
-  'Asia/Colombo',
-  'Africa/Monrovia',
-  'Europe/Vilnius',
-  'Europe/Luxembourg',
-  'Europe/Riga',
-  'Africa/Tripoli',
-  'Africa/Casablanca',
-  'Europe/Monaco',
-  'Europe/Chisinau',
-  'Pacific/Majuro',
-  'Pacific/Kwajalein',
-  'Asia/Yangon',
-  'Asia/Ulaanbaatar',
-  'Asia/Hovd',
-  'Asia/Choibalsan',
-  'Asia/Macau',
-  'America/Martinique',
-  'Europe/Malta',
-  'Indian/Mauritius',
-  'Indian/Maldives',
-  'America/Mexico_City',
-  'America/Cancun',
-  'America/Merida',
-  'America/Monterrey',
-  'America/Matamoros',
-  'America/Mazatlan',
-  'America/Chihuahua',
-  'America/Ojinaga',
-  'America/Hermosillo',
-  'America/Tijuana',
-  'America/Bahia_Banderas',
-  'Asia/Kuala_Lumpur',
-  'Asia/Kuching',
-  'Africa/Maputo',
-  'Africa/Windhoek',
-  'Pacific/Noumea',
-  'Pacific/Norfolk',
-  'Africa/Lagos',
-  'America/Managua',
-  'Europe/Amsterdam',
-  'Europe/Oslo',
-  'Asia/Kathmandu',
-  'Pacific/Nauru',
-  'Pacific/Niue',
-  'Pacific/Auckland',
-  'Pacific/Chatham',
-  'America/Panama',
-  'America/Lima',
-  'Pacific/Tahiti',
-  'Pacific/Marquesas',
-  'Pacific/Gambier',
-  'Pacific/Port_Moresby',
-  'Pacific/Bougainville',
-  'Asia/Manila',
-  'Asia/Karachi',
-  'Europe/Warsaw',
-  'America/Miquelon',
-  'Pacific/Pitcairn',
-  'America/Puerto_Rico',
-  'Asia/Gaza',
-  'Asia/Hebron',
-  'Europe/Lisbon',
-  'Atlantic/Madeira',
-  'Atlantic/Azores',
-  'Pacific/Palau',
-  'America/Asuncion',
-  'Asia/Qatar',
-  'Indian/Reunion',
-  'Europe/Bucharest',
-  'Europe/Belgrade',
-  'Europe/Kaliningrad',
-  'Europe/Moscow',
-  'Europe/Simferopol',
-  'Europe/Kirov',
-  'Europe/Astrakhan',
-  'Europe/Volgograd',
-  'Europe/Saratov',
-  'Europe/Ulyanovsk',
-  'Europe/Samara',
-  'Asia/Yekaterinburg',
-  'Asia/Omsk',
-  'Asia/Novosibirsk',
-  'Asia/Barnaul',
-  'Asia/Tomsk',
-  'Asia/Novokuznetsk',
-  'Asia/Krasnoyarsk',
-  'Asia/Irkutsk',
-  'Asia/Chita',
-  'Asia/Yakutsk',
-  'Asia/Khandyga',
-  'Asia/Vladivostok',
-  'Asia/Ust-Nera',
-  'Asia/Magadan',
-  'Asia/Sakhalin',
-  'Asia/Srednekolymsk',
-  'Asia/Kamchatka',
-  'Asia/Anadyr',
-  'Asia/Riyadh',
-  'Pacific/Guadalcanal',
-  'Indian/Mahe',
-  'Africa/Khartoum',
-  'Europe/Stockholm',
-  'Asia/Singapore',
-  'America/Paramaribo',
-  'Africa/Juba',
-  'Africa/Sao_Tome',
-  'America/El_Salvador',
-  'Asia/Damascus',
-  'America/Grand_Turk',
-  'Africa/Ndjamena',
-  'Indian/Kerguelen',
-  'Asia/Bangkok',
-  'Asia/Dushanbe',
-  'Pacific/Fakaofo',
-  'Asia/Dili',
-  'Asia/Ashgabat',
-  'Africa/Tunis',
-  'Pacific/Tongatapu',
-  'Europe/Istanbul',
-  'America/Port_of_Spain',
-  'Pacific/Funafuti',
-  'Asia/Taipei',
-  'Europe/Kiev',
-  'Europe/Uzhgorod',
-  'Europe/Zaporozhye',
-  'Pacific/Wake',
-  'America/New_York',
-  'America/Detroit',
-  'America/Kentucky/Louisville',
-  'America/Kentucky/Monticello',
-  'America/Indiana/Indianapolis',
-  'America/Indiana/Vincennes',
-  'America/Indiana/Winamac',
-  'America/Indiana/Marengo',
-  'America/Indiana/Petersburg',
-  'America/Indiana/Vevay',
-  'America/Chicago',
-  'America/Indiana/Tell_City',
-  'America/Indiana/Knox',
-  'America/Menominee',
-  'America/North_Dakota/Center',
-  'America/North_Dakota/New_Salem',
-  'America/North_Dakota/Beulah',
-  'America/Denver',
-  'America/Boise',
-  'America/Phoenix',
-  'America/Los_Angeles',
-  'America/Anchorage',
-  'America/Juneau',
-  'America/Sitka',
-  'America/Metlakatla',
-  'America/Yakutat',
-  'America/Nome',
-  'America/Adak',
-  'Pacific/Honolulu',
-  'America/Montevideo',
-  'Asia/Samarkand',
-  'Asia/Tashkent',
-  'America/Caracas',
-  'Asia/Ho_Chi_Minh',
-  'Pacific/Efate',
-  'Pacific/Wallis',
-  'Pacific/Apia',
-  'Africa/Johannesburg'
-];/* eslint-disable no-unused-vars */
 'use strict';
 
-const { GLib, St, Clutter, GnomeDesktop, Gio } = imports.gi;
-const { main, panelMenu, popupMenu } = imports.ui;
+import GLib from 'gi://GLib';
+import St from 'gi://St';
+import Clutter from 'gi://Clutter';
+import GnomeDesktop from 'gi://GnomeDesktop?version=4.0';
 
-const ExtensionUtils = imports.misc.extensionUtils;
-const Me = ExtensionUtils.getCurrentExtension();
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
+import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
-let Clock = {
-  config: {
-    format24: true,
-    showCity: true,
-    showTimezone: false
-  },
+import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
+
+import timezones from './timezones.js';
+
+// Whitelist of the only config keys this extension ever reads/writes.
+// Anything else present in the 'config' GSettings value (e.g. from a
+// tampered/foreign dconf entry) is ignored rather than blindly copied.
+const CONFIG_KEYS = ['format24', 'showCity', 'showTimezone'];
+
+export default class TimezonesExtension extends Extension {
   enable() {
-    Clock.state = timezones.sort().map((item) => {
+    this._config = {
+      format24: true,
+      showCity: true,
+      showTimezone: false
+    };
+    this._hint = '';
+
+    this._state = timezones.sort().map((item) => {
       return {
         timezone: item,
         lowerTimezone: item.toLowerCase(),
@@ -372,193 +35,212 @@ let Clock = {
       };
     });
 
-    Clock.schema = Gio.SettingsSchemaSource.new_from_directory(Me.dir.get_child('schemas').get_path(), Gio.SettingsSchemaSource.get_default(), false);
-    Clock.settings = new Gio.Settings({
-      settings_schema: Clock.schema.lookup('org.gnome.shell.extensions.timezones', true)
-    });
+    this._settings = this.getSettings();
 
-    Clock.loadSettings();
+    this._loadSettings();
 
-    let button = new panelMenu.Button(0.5, Me.metadata.name);
+    let button = new PanelMenu.Button(0.5, this.metadata.name);
     button.set_y_align(Clutter.ActorAlign.CENTER);
 
     let label = new St.Label({
       text: '...',
       opacity: 150
     });
-    button.actor.add_child(label);
+    button.add_child(label);
 
-    Clock.button = button;
-    Clock.label = label;
+    this._button = button;
+    this._label = label;
 
-    Clock.initMenu();
-    Clock.updateLabel();
+    this._initMenu();
+    this._updateLabel();
 
-    Clock.SystemClock = new GnomeDesktop.WallClock();
-    Clock.signalId = Clock.SystemClock.connect('notify::clock', Clock.updateLabel);
+    this._systemClock = new GnomeDesktop.WallClock();
+    this._signalId = this._systemClock.connect('notify::clock', () => this._updateLabel());
 
-    main.panel.addToStatusArea(`${Me.metadata.name} Indicator`, Clock.button, 1, 'center');
-  },
+    Main.panel.addToStatusArea(`${this.metadata.name} Indicator`, this._button, 1, 'center');
+  }
+
   disable() {
-    Clock.SystemClock.disconnect(Clock.signalId);
-    Clock.button.destroy();
-    Clock.saveSettings();
-  },
-  loadSettings() {
-    let timezones = Clock.settings.get_value('timezones');
-    let timezonesArray = timezones.deep_unpack();
+    if (this._systemClock && this._signalId) {
+      this._systemClock.disconnect(this._signalId);
+    }
+    this._signalId = null;
+    this._systemClock = null;
+
+    if (this._menu && this._menuOpenStateId) {
+      this._menu.disconnect(this._menuOpenStateId);
+    }
+    this._menuOpenStateId = null;
+
+    this._saveSettings();
+
+    if (this._button) {
+      this._button.destroy();
+    }
+
+    this._button = null;
+    this._label = null;
+    this._menu = null;
+    this._activeMenu = null;
+    this._inactiveMenu = null;
+    this._configMenu = null;
+    this._state = null;
+    this._settings = null;
+    this._config = null;
+    this._hint = null;
+  }
+
+  _loadSettings() {
+    let timezonesVariant = this._settings.get_value('timezones');
+    let timezonesArray = timezonesVariant.deep_unpack();
     if (timezonesArray.length > 0) {
-      Clock.state.forEach((item) => {
+      this._state.forEach((item) => {
         item.active = timezonesArray.indexOf(item.timezone) !== -1;
       });
     }
 
-    let config = Clock.settings.get_value('config');
-    let configObj = config.deep_unpack();
-    if (Object.keys(configObj).length > 0) {
-      for (let key in configObj) {
-        Clock.config[key] = configObj[key];
+    let configVariant = this._settings.get_value('config');
+    let configObj = configVariant.deep_unpack();
+    CONFIG_KEYS.forEach((key) => {
+      if (Object.prototype.hasOwnProperty.call(configObj, key)) {
+        this._config[key] = Boolean(configObj[key]);
       }
+    });
+  }
+
+  _saveSettings() {
+    if (!this._settings || !this._state || !this._config) {
+      return;
     }
-  },
-  saveSettings() {
-    Clock.settings.set_value(
+
+    this._settings.set_value(
       'timezones',
       new GLib.Variant(
         'as',
-        Clock.state.filter((item) => item.active).map((item) => item.timezone)
+        this._state.filter((item) => item.active).map((item) => item.timezone)
       )
     );
 
-    Clock.settings.set_value('config', new GLib.Variant('a{sb}', Clock.config));
-  },
-  initMenu() {
-    Clock.menu = Clock.button.menu;
-    Clock.activeMenu = Clock.createScrollableMenuSection();
-    Clock.inactiveMenu = Clock.createScrollableMenuSection();
-    Clock.configMenu = Clock.createScrollableMenuSection();
-    Clock.configMenu.itemActivated = () => {};
+    this._settings.set_value('config', new GLib.Variant('a{sb}', this._config));
+  }
 
-    Clock.addConfigSwitch({ label: '24 hours format', name: 'format24' });
-    Clock.addConfigSwitch({ label: 'Show city name', name: 'showCity' });
-    Clock.addConfigSwitch({ label: 'Show timezone', name: 'showTimezone' });
-    Clock.activeMenu.addMenuItem(new popupMenu.PopupSeparatorMenuItem('Active clocks'));
+  _initMenu() {
+    this._menu = this._button.menu;
+    this._activeMenu = this._createScrollableMenuSection();
+    this._inactiveMenu = this._createScrollableMenuSection();
+    this._configMenu = this._createScrollableMenuSection();
+    this._configMenu.itemActivated = () => {};
+
+    this._addConfigSwitch({ label: '24 hours format', name: 'format24' });
+    this._addConfigSwitch({ label: 'Show city name', name: 'showCity' });
+    this._addConfigSwitch({ label: 'Show timezone', name: 'showTimezone' });
+    this._activeMenu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem('Active clocks'));
 
     let inputFilter = new St.Entry({ width: 300, can_focus: true });
     inputFilter.clutter_text.connect('text-changed', (o) => {
-      Clock.hint = o.get_text().toLowerCase();
-      Clock.updateInactiveMenu();
+      this._hint = o.get_text().toLowerCase();
+      this._updateInactiveMenu();
     });
 
-    let inputFilterItem = new popupMenu.PopupBaseMenuItem({ reactive: false });
-    inputFilterItem.actor.add_child(inputFilter);
+    let inputFilterItem = new PopupMenu.PopupBaseMenuItem({ reactive: false });
+    inputFilterItem.add_child(inputFilter);
 
-    Clock.menu.addMenuItem(new popupMenu.PopupSeparatorMenuItem('Active clocks'));
-    Clock.menu.addMenuItem(Clock.activeMenu);
-    Clock.menu.addMenuItem(new popupMenu.PopupSeparatorMenuItem('Add more clocks'));
-    Clock.menu.addMenuItem(inputFilterItem);
-    Clock.menu.addMenuItem(Clock.inactiveMenu);
-    Clock.menu.addMenuItem(new popupMenu.PopupSeparatorMenuItem('Config'));
-    Clock.menu.addMenuItem(Clock.configMenu);
-    Clock.configMenu.addMenuItem(new popupMenu.PopupSeparatorMenuItem(''));
-    Clock.configMenu.addAction('Clear clocks', () => Clock.clearClocks());
+    this._menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem('Active clocks'));
+    this._menu.addMenuItem(this._activeMenu);
+    this._menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem('Add more clocks'));
+    this._menu.addMenuItem(inputFilterItem);
+    this._menu.addMenuItem(this._inactiveMenu);
+    this._menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem('Config'));
+    this._menu.addMenuItem(this._configMenu);
+    this._configMenu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem(''));
+    this._configMenu.addAction('Clear clocks', () => this._clearClocks());
 
-    Clock.menu.connect('open-state-changed', (menu, open) => {
+    this._menuOpenStateId = this._menu.connect('open-state-changed', (menu, open) => {
       if (open) {
         inputFilter.set_text('');
-        Clock.hint = '';
-        Clock.updateMenu();
+        this._hint = '';
+        this._updateMenu();
       }
     });
-  },
-  addConfigSwitch({ label, name }) {
-    let configSwitch = new popupMenu.PopupSwitchMenuItem(label, Clock.config[name]);
-    configSwitch.connect('toggled', (event, state) => {
-      Clock.config[name] = state;
-      Clock.saveSettings();
-      Clock.updateLabel();
+  }
+
+  _addConfigSwitch({ label, name }) {
+    let configSwitch = new PopupMenu.PopupSwitchMenuItem(label, this._config[name]);
+    configSwitch.connect('toggled', (item, state) => {
+      this._config[name] = state;
+      this._saveSettings();
+      this._updateLabel();
     });
-    Clock.configMenu.addMenuItem(configSwitch);
-  },
-  createScrollableMenuSection() {
-    let menu = new popupMenu.PopupMenuSection();
+    this._configMenu.addMenuItem(configSwitch);
+  }
+
+  _createScrollableMenuSection() {
+    let menu = new PopupMenu.PopupMenuSection();
     menu.actor = new St.ScrollView({
       style_class: 'popup-menu-content',
       hscrollbar_policy: St.PolicyType.NEVER,
       vscrollbar_policy: St.PolicyType.AUTOMATIC
     });
-    menu.actor.add_actor(menu.box);
+    menu.actor.add_child(menu.box);
     return menu;
-  },
-  updateLabel() {
+  }
+
+  _updateLabel() {
     let text = '';
-    Clock.state.forEach((item) => (text += item.active ? `    ${Clock.getLabelForTimezone({ item: item })}` : ''));
+    this._state.forEach((item) => (text += item.active ? `    ${this._getLabelForTimezone({ item: item })}` : ''));
     text = text.trim();
 
     if (text.length === 0) {
       text = '...';
     }
 
-    Clock.label.text = text;
-  },
-  getLabelForTimezone({ item, full }) {
+    this._label.text = text;
+  }
+
+  _getLabelForTimezone({ item, full }) {
     let glibTimezone = GLib.TimeZone.new(item.timezone);
     let now = GLib.DateTime.new_now(glibTimezone);
-    let timezoneLabel = full ? item.timezone : Clock.config.showCity ? item.timezone.split('/').pop().replace('_', ' ') : '';
-    let offset = full || Clock.config.showTimezone ? ` ${now.format('%Z')} ` : ' ';
-    return `${timezoneLabel}${offset}${now.format(Clock.config.format24 ? '%R' : '%l:%M %p')}`;
-  },
-  updateMenu() {
-    Clock.updateTimeLabels();
-    Clock.updateActiveMenu();
-    Clock.updateInactiveMenu();
-  },
-  updateTimeLabels() {
-    Clock.state.forEach((item) => (item.label = Clock.getLabelForTimezone({ item: item, full: true })));
-  },
-  updateActiveMenu() {
+    let timezoneLabel = full ? item.timezone : this._config.showCity ? item.timezone.split('/').pop().replace('_', ' ') : '';
+    let offset = full || this._config.showTimezone ? ` ${now.format('%Z')} ` : ' ';
+    return `${timezoneLabel}${offset}${now.format(this._config.format24 ? '%R' : '%l:%M %p')}`;
+  }
+
+  _updateMenu() {
+    this._updateTimeLabels();
+    this._updateActiveMenu();
+    this._updateInactiveMenu();
+  }
+
+  _updateTimeLabels() {
+    this._state.forEach((item) => (item.label = this._getLabelForTimezone({ item: item, full: true })));
+  }
+
+  _updateActiveMenu() {
     let active = String.fromCodePoint(parseInt('2714', 16));
-    Clock.activeMenu.removeAll();
+    this._activeMenu.removeAll();
 
-    Clock.state.filter((item) => item.active).forEach((item) => Clock.activeMenu.addAction(`${active} ${item.label}`, () => Clock.toggleTimezone(item)));
-  },
-  updateInactiveMenu() {
-    Clock.inactiveMenu.removeAll();
-    Clock.state
-      .filter((item) => !item.active && item.lowerTimezone.indexOf(Clock.hint) !== -1)
-      .forEach((item) => Clock.inactiveMenu.addAction(item.label, () => Clock.toggleTimezone(item)));
-  },
-  toggleTimezone(item) {
+    this._state
+      .filter((item) => item.active)
+      .forEach((item) => this._activeMenu.addAction(`${active} ${item.label}`, () => this._toggleTimezone(item)));
+  }
+
+  _updateInactiveMenu() {
+    this._inactiveMenu.removeAll();
+    this._state
+      .filter((item) => !item.active && item.lowerTimezone.indexOf(this._hint) !== -1)
+      .forEach((item) => this._inactiveMenu.addAction(item.label, () => this._toggleTimezone(item)));
+  }
+
+  _toggleTimezone(item) {
     item.active = !item.active;
-    Clock.updateLabel();
-    Clock.saveSettings();
-  },
-  clearClocks() {
-    Clock.state.forEach((item) => (item.active = false));
-    Clock.updateMenu();
-    Clock.updateLabel();
-    Clock.saveSettings();
+    this._updateLabel();
+    this._saveSettings();
   }
-};
 
-function init() {
-  log(`initializing ${Me.metadata.name} version ${Me.metadata.version}`);
-}
-
-function enable() {
-  log(`enabling ${Me.metadata.name} version ${Me.metadata.version}`);
-  try {
-    Clock.enable();
-  } catch (error) {
-    logError(error);
-  }
-}
-
-function disable() {
-  log(`disabling ${Me.metadata.name} version ${Me.metadata.version}`);
-  try {
-    Clock.disable();
-  } catch (error) {
-    logError(error);
+  _clearClocks() {
+    this._state.forEach((item) => (item.active = false));
+    this._updateMenu();
+    this._updateLabel();
+    this._saveSettings();
   }
 }
