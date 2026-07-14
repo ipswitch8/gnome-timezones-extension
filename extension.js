@@ -181,7 +181,10 @@ export default class TimezonesExtension extends Extension {
       hscrollbar_policy: St.PolicyType.NEVER,
       vscrollbar_policy: St.PolicyType.AUTOMATIC
     });
-    menu.actor.add_child(menu.box);
+    // St.ScrollView only allocates the actor in its 'child' property;
+    // a generic add_child() leaves the box unallocated (invisible) on
+    // GNOME 46+. set_child() also works on 45 via the St.Bin parent.
+    menu.actor.set_child(menu.box);
     return menu;
   }
 
