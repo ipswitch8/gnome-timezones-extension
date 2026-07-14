@@ -6,5 +6,5 @@
   "url": "https://github.com/Masquerade-Circus/gnome-timezones-extension",
   "uuid": "timezones@masquerade-circus.net",
   "settings-schema": "org.gnome.shell.extensions.timezones",
-  "version": 7
+  "version": 8
 }
