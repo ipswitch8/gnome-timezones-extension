@@ -6,7 +6,13 @@ generate-city-aliases.py
 
 Generates ``cityAliases.js`` (repo root, next to ``timezones.js``) from the
 GeoNames "cities15000" dataset, mapping searchable lowercase city names to
-IANA timezone identifiers that are already present in ``timezones.js``.
+a ``[zoneId, displayName]`` pair: an IANA timezone identifier that is
+already present in ``timezones.js``, plus the properly-cased/diacritic
+display form of the city name that produced that lowercase key (e.g.
+``'seattle': ['America/Los_Angeles', 'Seattle']``,
+``'são paulo': ['America/Sao_Paulo', 'São Paulo']``). This lets UI code
+search on the lowercase key while still rendering the city name with
+correct casing/diacritics.
 
 Provenance
 ----------
@@ -67,11 +73,19 @@ spot-check keys like 'kathmandu' and 'adelaide' present unconditionally. A
 flag (--skip-self-zone-name-keys) is provided to opt into the leaner
 behavior described in the design discussion, but it defaults to OFF.
 
+Each alias key carries its OWN display form: the key derived from
+``name.lower()`` displays the original ``name`` (native casing/diacritics,
+e.g. 'São Paulo'), and the key derived from ``asciiname.lower()`` displays
+the original ``asciiname`` (e.g. 'Sao Paulo'). If both fields lower-case to
+the same key within one row, the ``name`` field's display wins (arbitrary
+but deterministic) since it's the more authoritative field.
+
 Collision policy
 -----------------
 If two different kept cities produce the identical lowercase alias key but
 map to *different* zones (e.g. 'san jose' -> America/Los_Angeles vs
-America/Costa_Rica), the entry with the larger population wins; the loser is
+America/Costa_Rica), the entry with the larger population wins (its zone
+AND its display form are both taken from the winning city); the loser is
 reported in the summary as a dropped collision.
 
 Equivalent-zone resolution (empirical, not a hardcoded rename table)
@@ -318,7 +332,7 @@ def resolve_equivalent_zone(
 
 
 class BuildResult(NamedTuple):
-    alias_map: Dict[str, str]
+    alias_map: Dict[str, Tuple[str, str]]  # key -> (zone, display_name)
     kept_city_count: int
     dropped_unknown_zone_count: int
     dropped_zone_counter: Dict[str, int]
@@ -338,8 +352,9 @@ def build_aliases(
     dropped_unknown_zone_count = 0
     dropped_zone_counter: Dict[str, int] = {}
 
-    # candidate_key -> (population, zone) for collision resolution
-    candidates: Dict[str, Tuple[int, str]] = {}
+    # candidate_key -> (population, zone, display_name) for collision
+    # resolution.
+    candidates: Dict[str, Tuple[int, str, str]] = {}
     collisions_dropped = 0
 
     # Empirical equivalent-zone resolution bookkeeping.
@@ -389,33 +404,43 @@ def build_aliases(
 
         kept_city_count += 1
 
-        keys = {row.name.lower(), row.asciiname.lower()}
-        keys.discard("")
+        # Each key carries its OWN display form: name.lower() displays
+        # `name`, asciiname.lower() displays `asciiname`. If both fields
+        # lower-case to the same key within this row, `name`'s display
+        # wins (inserted first, asciiname only fills in if the key is new).
+        row_key_displays: Dict[str, str] = {}
+        if row.name:
+            row_key_displays[row.name.lower()] = row.name
+        if row.asciiname and row.asciiname.lower() not in row_key_displays:
+            row_key_displays[row.asciiname.lower()] = row.asciiname
 
         if skip_self_zone_name_keys:
             self_key = zone_final_segment_as_key(effective_zone)
-            keys.discard(self_key)
+            row_key_displays.pop(self_key, None)
 
-        for key in keys:
+        for key, display in row_key_displays.items():
             existing = candidates.get(key)
             if existing is None:
-                candidates[key] = (row.population, effective_zone)
+                candidates[key] = (row.population, effective_zone, display)
             else:
-                existing_pop, existing_zone = existing
+                existing_pop, existing_zone, existing_display = existing
                 if existing_zone == effective_zone:
                     # Same key, same zone already recorded -- no-op
-                    # (keep the higher population just in case, though
-                    # the zone is identical so it doesn't affect output).
+                    # (keep the higher population's display just in case,
+                    # though the zone is identical so it mostly doesn't
+                    # affect search behaviour).
                     if row.population > existing_pop:
-                        candidates[key] = (row.population, effective_zone)
+                        candidates[key] = (row.population, effective_zone, display)
                     continue
                 # Collision: different zone for the same key.
                 collisions_dropped += 1
                 if row.population > existing_pop:
-                    candidates[key] = (row.population, effective_zone)
+                    candidates[key] = (row.population, effective_zone, display)
                 # else keep existing (it already has the larger population)
 
-    alias_map = {key: zone for key, (_, zone) in candidates.items()}
+    alias_map = {
+        key: (zone, display) for key, (_, zone, display) in candidates.items()
+    }
     return BuildResult(
         alias_map=alias_map,
         kept_city_count=kept_city_count,
@@ -451,7 +476,9 @@ def describe_tzdata_source() -> str:
     return "; ".join(parts)
 
 
-def render_output(alias_map: Dict[str, str], equivalence_map: Dict[str, str]) -> str:
+def render_output(
+    alias_map: Dict[str, Tuple[str, str]], equivalence_map: Dict[str, str]
+) -> str:
     tzdata_source = describe_tzdata_source()
     equiv_lines = ""
     if equivalence_map:
@@ -484,15 +511,24 @@ def render_output(alias_map: Dict[str, str], equivalence_map: Dict[str, str]) ->
 {equiv_lines}//
 // To regenerate: python3 tools/generate-city-aliases.py
 //
-// Maps a lowercase searchable city name to an IANA timezone id already
-// present in timezones.js. Every zone id referenced here is guaranteed (by
-// the generator's validation step) to exist in timezones.js.
+// Value format: each lowercase searchable city name key maps to a
+// 2-element array [zoneId, displayName]:
+//   - zoneId:      an IANA timezone id already present in timezones.js
+//                  (guaranteed by the generator's validation step).
+//   - displayName: the properly-cased/diacritic city name that produced
+//                  this key (from GeoNames `name` or `asciiname`), for
+//                  rendering search results with correct casing, e.g.
+//                  'seattle': ['America/Los_Angeles', 'Seattle'],
+//                  'são paulo': ['America/Sao_Paulo', 'São Paulo'],
+//                  'sao paulo': ['America/Sao_Paulo', 'Sao Paulo'],
 """
     lines = [header, "export default {"]
     for key in sorted(alias_map.keys()):
+        zone, display = alias_map[key]
         escaped_key = escape_js_single_quoted(key)
-        escaped_zone = escape_js_single_quoted(alias_map[key])
-        lines.append(f"  '{escaped_key}': '{escaped_zone}',")
+        escaped_zone = escape_js_single_quoted(zone)
+        escaped_display = escape_js_single_quoted(display)
+        lines.append(f"  '{escaped_key}': ['{escaped_zone}', '{escaped_display}'],")
     lines.append("};")
     lines.append("")  # trailing newline
     return "\n".join(lines)
@@ -539,9 +575,30 @@ def main() -> int:
             f"[{ALIAS_COUNT_MIN}, {ALIAS_COUNT_MAX}]"
         )
 
-    # Every referenced zone must exist in timezones.js (should always be true
-    # by construction, but verify defensively).
-    referenced_zones = set(alias_map.values())
+    # Every value must be a well-formed [zone, display] pair, every
+    # referenced zone must exist in timezones.js (should always be true by
+    # construction, but verify defensively), and every display string,
+    # lowercased, must equal its own key.
+    referenced_zones = set()
+    for key, value in alias_map.items():
+        if (
+            not isinstance(value, tuple)
+            or len(value) != 2
+            or not isinstance(value[0], str)
+            or not isinstance(value[1], str)
+        ):
+            failures.append(
+                f"alias_map['{key}'] is not a 2-element (zone, display) pair of strings: {value!r}"
+            )
+            continue
+        zone, display = value
+        referenced_zones.add(zone)
+        if display.lower() != key:
+            failures.append(
+                f"alias_map['{key}'] display {display!r} lowercased "
+                f"({display.lower()!r}) does not equal its own key {key!r}"
+            )
+
     unknown_referenced = referenced_zones - valid_zones
     if unknown_referenced:
         failures.append(
@@ -549,16 +606,21 @@ def main() -> int:
         )
 
     spot_checks = {
-        "seattle": "America/Los_Angeles",
-        "kathmandu": "Asia/Kathmandu",
-        "adelaide": "Australia/Adelaide",
-        "kyiv": "Europe/Kiev",
+        "seattle": ("America/Los_Angeles", "Seattle"),
+        "kathmandu": ("Asia/Kathmandu", "Kathmandu"),
+        "adelaide": ("Australia/Adelaide", "Adelaide"),
+        "kyiv": ("Europe/Kiev", "Kyiv"),
     }
-    for key, expected_zone in spot_checks.items():
+    for key, (expected_zone, expected_display) in spot_checks.items():
         actual = alias_map.get(key)
-        if actual != expected_zone:
+        if actual is None:
+            failures.append(f"spot check failed: '{key}' missing from alias_map entirely")
+            continue
+        actual_zone, actual_display = actual
+        if actual_zone != expected_zone or actual_display != expected_display:
             failures.append(
-                f"spot check failed: '{key}' -> {actual!r}, expected {expected_zone!r}"
+                f"spot check failed: '{key}' -> {actual!r}, "
+                f"expected ({expected_zone!r}, {expected_display!r})"
             )
 
     # 'luanda' must exist (i.e. survive equivalence resolution rather than
@@ -566,21 +628,23 @@ def main() -> int:
     # whose offset signature matches Africa/Luanda's -- we don't hardcode
     # the exact target id, only verify the empirical property that made it
     # eligible in the first place.
-    luanda_zone = alias_map.get("luanda")
-    if luanda_zone is None:
+    luanda_entry = alias_map.get("luanda")
+    if luanda_entry is None:
         failures.append("spot check failed: 'luanda' missing from alias_map entirely")
-    elif not luanda_zone.startswith("Africa/"):
-        failures.append(
-            f"spot check failed: 'luanda' -> {luanda_zone!r}, expected an Africa/ zone"
-        )
     else:
-        luanda_sig = _zone_offset_signature("Africa/Luanda")
-        mapped_sig = _zone_offset_signature(luanda_zone)
-        if luanda_sig is None or mapped_sig is None or luanda_sig != mapped_sig:
+        luanda_zone, _luanda_display = luanda_entry
+        if not luanda_zone.startswith("Africa/"):
             failures.append(
-                f"spot check failed: 'luanda' -> {luanda_zone!r} does not have an "
-                f"identical UTC-offset signature to Africa/Luanda across the sample window"
+                f"spot check failed: 'luanda' -> {luanda_zone!r}, expected an Africa/ zone"
             )
+        else:
+            luanda_sig = _zone_offset_signature("Africa/Luanda")
+            mapped_sig = _zone_offset_signature(luanda_zone)
+            if luanda_sig is None or mapped_sig is None or luanda_sig != mapped_sig:
+                failures.append(
+                    f"spot check failed: 'luanda' -> {luanda_zone!r} does not have an "
+                    f"identical UTC-offset signature to Africa/Luanda across the sample window"
+                )
 
     # --- Summary -------------------------------------------------------------
     print("=" * 70)
@@ -614,8 +678,8 @@ def main() -> int:
     print(f"skip_self_zone_name_keys: {args.skip_self_zone_name_keys}")
     print(f"tzdata source: {describe_tzdata_source()}")
     print("Spot checks:")
-    for key, expected_zone in spot_checks.items():
-        print(f"  {key!r} -> {alias_map.get(key)!r} (expected {expected_zone!r})")
+    for key, expected in spot_checks.items():
+        print(f"  {key!r} -> {alias_map.get(key)!r} (expected {expected!r})")
     print(f"  'luanda' -> {alias_map.get('luanda')!r} (expected: some Africa/ zone with matching offsets)")
 
     if failures:

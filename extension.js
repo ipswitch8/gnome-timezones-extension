@@ -17,7 +17,7 @@ import cityAliases from './cityAliases.js';
 // Whitelist of the only config keys this extension ever reads/writes.
 // Anything else present in the 'config' GSettings value (e.g. from a
 // tampered/foreign dconf entry) is ignored rather than blindly copied.
-const CONFIG_KEYS = ['format24', 'showCity', 'showTimezone'];
+const CONFIG_KEYS = ['format24', 'showCity', 'showTimezone', 'hideSystemClock'];
 
 // Maximum length of a user-supplied per-zone display label (Feature B).
 // Long enough for short custom names ("Home", "Mom's house") while keeping
@@ -45,35 +45,45 @@ const UNSAFE_LABEL_CHARS = new RegExp(
   'gu'
 );
 
+// Checkmark prefix used for already-active zones, shared by the active-clock
+// rows and the search-result rows (a checkmarked search result is already
+// active; clicking it toggles it off, same as clicking it in Active clocks).
+const ACTIVE_MARK = String.fromCodePoint(0x2714);
+
 export default class TimezonesExtension extends Extension {
   enable() {
     this._config = {
       format24: true,
       showCity: true,
-      showTimezone: false
+      showTimezone: false,
+      hideSystemClock: false
     };
     this._hint = '';
     this._labels = {};
+    // Tracks whether WE hid GNOME Shell's own top-bar clock, so disable()
+    // only ever restores visibility it actually changed (see
+    // _applySystemClockVisibility()).
+    this._hidSystemClock = false;
 
-    // Invert the city-alias map once (zone -> ' city1 city2 ...') so each
-    // zone's combined search string is built in a single O(n) pass over
-    // cityAliases, rather than scanning all ~1.3k aliases per zone
-    // (O(n*m)) inside the state-building loop below.
-    let aliasesByZone = new Map();
-    Object.keys(cityAliases).forEach((city) => {
-      let zone = cityAliases[city];
-      let existing = aliasesByZone.get(zone);
-      aliasesByZone.set(zone, existing ? `${existing} ${city}` : city);
+    // Feature A: flatten cityAliases once into {key, zone, display} rows.
+    // cityAliases values are [zone, displayName] tuples keyed by the
+    // lowercase search form (which may differ from displayName only in
+    // case/diacritics, e.g. 'sao paulo' -> ['America/Sao_Paulo', 'Sao Paulo']).
+    // This replaces the old per-zone concatenated search-string approach:
+    // _updateInactiveMenu now matches each alias key against the hint
+    // directly (one pass over this._aliases) instead of pre-joining city
+    // names into every zone's row.
+    this._aliases = Object.keys(cityAliases).map((key) => {
+      let [zone, display] = cityAliases[key];
+      return { key, zone, display };
     });
 
     this._state = timezones.sort().map((item) => {
-      let lowerTimezone = item.toLowerCase();
-      let extraCities = aliasesByZone.get(item);
       return {
         timezone: item,
-        // Precomputed once per zone: the zone id plus any alias city
-        // names that map to it, used for menu filtering (Feature A).
-        searchText: extraCities ? `${lowerTimezone} ${extraCities}` : lowerTimezone,
+        // Plain lowercase zone id, used to match the zone's own row when
+        // no alias of it matches the current search hint.
+        lower: item.toLowerCase(),
         active: item === 'UTC'
       };
     });
@@ -81,6 +91,7 @@ export default class TimezonesExtension extends Extension {
     this._settings = this.getSettings();
 
     this._loadSettings();
+    this._applySystemClockVisibility();
 
     let button = new PanelMenu.Button(0.5, this.metadata.name);
     button.set_y_align(Clutter.ActorAlign.CENTER);
@@ -104,6 +115,19 @@ export default class TimezonesExtension extends Extension {
   }
 
   disable() {
+    // Restore the system clock's visibility BEFORE the rest of teardown,
+    // and only if we were the one who hid it. This runs first because
+    // disable() is also called on lock screen (GNOME Shell disables
+    // extensions there), so the system clock must reliably come back
+    // rather than staying hidden behind a locked screen.
+    if (this._hidSystemClock) {
+      let clockDisplay = Main.panel.statusArea.dateMenu?._clockDisplay;
+      if (clockDisplay) {
+        clockDisplay.visible = true;
+      }
+    }
+    this._hidSystemClock = null;
+
     if (this._systemClock && this._signalId) {
       this._systemClock.disconnect(this._signalId);
     }
@@ -132,6 +156,7 @@ export default class TimezonesExtension extends Extension {
     this._config = null;
     this._hint = null;
     this._labels = null;
+    this._aliases = null;
   }
 
   _loadSettings() {
@@ -228,6 +253,7 @@ export default class TimezonesExtension extends Extension {
     this._addConfigSwitch({ label: '24 hours format', name: 'format24' });
     this._addConfigSwitch({ label: 'Show city name', name: 'showCity' });
     this._addConfigSwitch({ label: 'Show timezone', name: 'showTimezone' });
+    this._addConfigSwitch({ label: 'Hide system clock', name: 'hideSystemClock' });
     this._activeMenu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem('Active clocks'));
 
     let inputFilter = new St.Entry({ width: 300, can_focus: true });
@@ -264,8 +290,32 @@ export default class TimezonesExtension extends Extension {
       this._config[name] = state;
       this._saveSettings();
       this._updateLabel();
+      // Cheap/simple to call unconditionally for every config switch (not
+      // just 'hideSystemClock'): it no-ops instantly when the visibility
+      // already matches this._config.hideSystemClock. This is also what
+      // makes the switch apply immediately -- the user sees the system
+      // clock vanish/reappear the moment they flip it, no restart needed.
+      this._applySystemClockVisibility();
     });
     this._configMenu.addMenuItem(configSwitch);
+  }
+
+  // Hides/shows GNOME Shell's own top-bar clock label to match
+  // this._config.hideSystemClock. `_clockDisplay` is a private Shell
+  // implementation member (not public API), so this is guarded to
+  // silently no-op -- never throw -- if it's missing on some future
+  // GNOME Shell version. this._hidSystemClock records whether WE were the
+  // one to hide it, so disable() only restores visibility it actually
+  // changed (never fighting another extension managing the same label).
+  _applySystemClockVisibility() {
+    let clockDisplay = Main.panel.statusArea.dateMenu?._clockDisplay;
+    if (!clockDisplay) {
+      return;
+    }
+
+    let shouldHide = Boolean(this._config.hideSystemClock);
+    clockDisplay.visible = !shouldHide;
+    this._hidSystemClock = shouldHide;
   }
 
   _createScrollableMenuSection() {
@@ -294,16 +344,22 @@ export default class TimezonesExtension extends Extension {
     this._label.text = text;
   }
 
-  _getLabelForTimezone({ item, full }) {
+  // `nameOverride`, when given, is a matched search-result alias display
+  // name (Feature A) and takes priority over any stored per-zone label
+  // (Feature B) for the row's name segment -- this is the single place
+  // that formats "Name (zone/id)", reused by both features instead of
+  // duplicating the format logic at each call site.
+  _getLabelForTimezone({ item, full, nameOverride }) {
     let glibTimezone = GLib.TimeZone.new(item.timezone);
     let now = GLib.DateTime.new_now(glibTimezone);
-    let alias = this._labels ? this._labels[item.timezone] : undefined;
+    let alias = nameOverride || (this._labels ? this._labels[item.timezone] : undefined);
     let timezoneLabel;
 
     if (full) {
-      // Full form (active-clock menu rows): always show the zone id so
-      // it stays identifiable; when a custom alias is set, prefix it and
-      // keep the zone id visible in parens, e.g. "Home (America/Los_Angeles)".
+      // Full form (active-clock and search-result menu rows): always show
+      // the zone id so it stays identifiable; when a name is given
+      // (override or stored label), prefix it and keep the zone id visible
+      // in parens, e.g. "Home (America/Los_Angeles)".
       timezoneLabel = alias ? `${alias} (${item.timezone})` : item.timezone;
     } else {
       // Panel form: the alias substitutes for the city-name segment, so
@@ -327,10 +383,9 @@ export default class TimezonesExtension extends Extension {
   }
 
   _updateActiveMenu() {
-    let active = String.fromCodePoint(parseInt('2714', 16));
     this._activeMenu.removeAll();
 
-    this._state.filter((item) => item.active).forEach((item) => this._addActiveMenuRow(item, active));
+    this._state.filter((item) => item.active).forEach((item) => this._addActiveMenuRow(item, ACTIVE_MARK));
   }
 
   // Builds one active-clock row as a custom PopupBaseMenuItem: a label
@@ -430,15 +485,103 @@ export default class TimezonesExtension extends Extension {
     this._activeMenu.addMenuItem(menuItem);
   }
 
+  // With an empty hint, keep the original behavior: only inactive zones are
+  // listed (so the section doesn't duplicate Active clocks when the user
+  // isn't searching). Once the user types a hint, every matching zone is
+  // shown -- including already-active ones, marked with ACTIVE_MARK -- so
+  // search never hides a result just because it happens to be active.
   _updateInactiveMenu() {
     this._inactiveMenu.removeAll();
-    this._state
-      .filter((item) => !item.active && item.searchText.indexOf(this._hint) !== -1)
-      .forEach((item) => this._inactiveMenu.addAction(item.label, () => this._toggleTimezone(item)));
+    let hint = this._hint;
+
+    if (hint === '') {
+      this._state
+        .filter((item) => !item.active)
+        .forEach((item) => this._inactiveMenu.addAction(item.label, () => this._toggleTimezone(item)));
+      return;
+    }
+
+    // Per keystroke: one pass over this._aliases (~1.3k entries) to find
+    // each zone's single best-matching alias, then one pass over
+    // this._state (349 zones) to build at most one row per zone. No
+    // per-zone re-scan of the alias list (that would be the O(n*m) cost
+    // this precomputed/flattened structure is meant to avoid).
+    let bestAliasByZone = new Map();
+    this._aliases.forEach((alias) => {
+      if (alias.key.indexOf(hint) === -1) {
+        return;
+      }
+      let current = bestAliasByZone.get(alias.zone);
+      if (!current || this._isBetterAliasMatch(alias, current, hint)) {
+        bestAliasByZone.set(alias.zone, alias);
+      }
+    });
+
+    this._state.forEach((item) => {
+      let alias = bestAliasByZone.get(item.timezone);
+      if (!alias && item.lower.indexOf(hint) === -1) {
+        return;
+      }
+
+      // An alias match always wins over the zone's own row, even if the
+      // zone id also happens to contain the hint -- at most one row per zone.
+      let label = alias ? this._getLabelForTimezone({ item, full: true, nameOverride: alias.display }) : item.label;
+      let text = item.active ? `${ACTIVE_MARK} ${label}` : label;
+
+      this._inactiveMenu.addAction(text, () => {
+        if (item.active) {
+          // Checkmarked result: toggling off leaves any stored label alone.
+          this._toggleTimezone(item);
+        } else if (alias) {
+          // Selecting an alias match both activates the zone and sets its
+          // display label to the alias's display name (overwriting any
+          // previously stored label for that zone).
+          this._activateWithAlias(item, alias.display);
+        } else {
+          this._toggleTimezone(item);
+        }
+      });
+    });
+  }
+
+  // Picks the better of two same-zone alias matches for a given hint:
+  // prefer a key that startsWith(hint), then the shortest key, then
+  // alphabetical order -- matching the phase spec's tie-break rules.
+  _isBetterAliasMatch(candidate, current, hint) {
+    let candidateStarts = candidate.key.startsWith(hint);
+    let currentStarts = current.key.startsWith(hint);
+    if (candidateStarts !== currentStarts) {
+      return candidateStarts;
+    }
+
+    if (candidate.key.length !== current.key.length) {
+      return candidate.key.length < current.key.length;
+    }
+
+    return candidate.key < current.key;
   }
 
   _toggleTimezone(item) {
     item.active = !item.active;
+    this._updateLabel();
+    this._saveSettings();
+  }
+
+  // Activates `item` and sets its stored display label to displayName in
+  // one step (sanitize -> set -> activate -> single save -> refresh panel),
+  // so the panel immediately shows the alias (e.g. "Seattle") instead of
+  // requiring two separate settings writes. This intentionally overwrites
+  // any label previously stored for the zone.
+  _activateWithAlias(item, displayName) {
+    item.active = true;
+
+    let sanitized = this._sanitizeLabel(displayName);
+    if (sanitized.length > 0) {
+      this._labels[item.timezone] = sanitized;
+    } else {
+      delete this._labels[item.timezone];
+    }
+
     this._updateLabel();
     this._saveSettings();
   }
