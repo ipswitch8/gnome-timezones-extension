@@ -8,6 +8,7 @@ import GnomeDesktop from 'gi://GnomeDesktop?version=4.0';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
+import * as DND from 'resource:///org/gnome/shell/ui/dnd.js';
 
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
@@ -17,7 +18,7 @@ import cityAliases from './cityAliases.js';
 // Whitelist of the only config keys this extension ever reads/writes.
 // Anything else present in the 'config' GSettings value (e.g. from a
 // tampered/foreign dconf entry) is ignored rather than blindly copied.
-const CONFIG_KEYS = ['format24', 'showCity', 'showTimezone', 'hideSystemClock'];
+const CONFIG_KEYS = ['format24', 'showCity', 'showTimezone', 'hideSystemClock', 'showSeparator'];
 
 // Maximum length of a user-supplied per-zone display label (Feature B).
 // Long enough for short custom names ("Home", "Mom's house") while keeping
@@ -56,7 +57,8 @@ export default class TimezonesExtension extends Extension {
       format24: true,
       showCity: true,
       showTimezone: false,
-      hideSystemClock: false
+      hideSystemClock: false,
+      showSeparator: false
     };
     this._hint = '';
     this._labels = {};
@@ -87,6 +89,17 @@ export default class TimezonesExtension extends Extension {
         active: item === 'UTC'
       };
     });
+
+    // O(1) zone-id -> state-item lookup, built once. Feature A's ordered
+    // active list (this._activeOrder) stores plain zone ids; this map is
+    // how _updateLabel/_updateActiveMenu resolve each id back to its state
+    // item (and its precomputed `label`) without a linear scan of
+    // this._state (which stays alphabetically sorted for the search list).
+    this._stateByZone = new Map(this._state.map((item) => [item.timezone, item]));
+
+    // Authoritative display order for active clocks (Feature A); populated
+    // by _loadSettings() below from the stored 'timezones' order.
+    this._activeOrder = [];
 
     this._settings = this.getSettings();
 
@@ -157,16 +170,27 @@ export default class TimezonesExtension extends Extension {
     this._hint = null;
     this._labels = null;
     this._aliases = null;
+    this._activeOrder = null;
+    this._stateByZone = null;
   }
 
   _loadSettings() {
     let timezonesVariant = this._settings.get_value('timezones');
     let timezonesArray = timezonesVariant.deep_unpack();
-    if (timezonesArray.length > 0) {
-      this._state.forEach((item) => {
-        item.active = timezonesArray.indexOf(item.timezone) !== -1;
-      });
-    }
+
+    // Feature A: the stored 'timezones' array order is now authoritative
+    // for display order (it used to be read only for membership, then
+    // rendered alphabetically). Reconcile it against whatever is active in
+    // this._state right now (only the enable()-time default -- UTC -- at
+    // this point, since this runs before anything else touches state)
+    // so a stored order that's missing a currently-active zone doesn't
+    // silently drop that zone from the ordered list.
+    let currentActive = this._state.filter((item) => item.active).map((item) => item.timezone);
+    this._activeOrder = this._reconcileActiveOrder(timezonesArray, currentActive);
+
+    this._state.forEach((item) => {
+      item.active = this._activeOrder.indexOf(item.timezone) !== -1;
+    });
 
     let configVariant = this._settings.get_value('config');
     let configObj = configVariant.deep_unpack();
@@ -192,6 +216,56 @@ export default class TimezonesExtension extends Extension {
         this._labels[zone] = sanitized;
       }
     });
+  }
+
+  // Pure reconciliation used when loading settings: takes the stored
+  // order (which may reference unknown/removed zones, e.g. from an older
+  // timezones.js or a hand-edited dconf entry) and a list of zones that
+  // are considered active independent of that order, and produces the
+  // reconciled order -- the stored order filtered to zones this extension
+  // recognizes (this._stateByZone), followed by any active zone not
+  // already present, appended in the order given.
+  //
+  // INVARIANT: this._activeOrder contains each zone id AT MOST ONCE,
+  // always. This is enforced HERE (a single `seen` Set de-duplicates
+  // across both the stored-order pass and the appended-active-zones
+  // pass, first occurrence wins) and preserved afterwards by every other
+  // mutator of this._activeOrder (_toggleTimezone's activate path and
+  // _activateWithAlias both guard with indexOf before pushing;
+  // _reorderActiveZone only ever removes-and-reinserts a single existing
+  // occurrence). The stored 'timezones' GSettings value is a plain `as`
+  // array with no uniqueness constraint, so a hand-edited/tampered dconf
+  // entry could otherwise repeat a valid, known zone id arbitrarily many
+  // times -- filtering to known zones alone does NOT bound the array's
+  // length in that case, since a known id can still appear N times.
+  // Without de-duplication, that would let _updateActiveMenu build one
+  // full row (PopupBaseMenuItem + drag handle + edit button + entry) per
+  // repetition on every menu open: unbounded actor construction driven
+  // entirely by an untrusted settings value. With de-duplication,
+  // this._activeOrder's length is bounded by the number of known zones
+  // (~349) as an actual consequence of the invariant, so no separate
+  // length cap is needed on top of it. See the scratch-node test for the
+  // same logic parameterized on a plain knownZones Set, exercised without
+  // gnome-shell imports.
+  _reconcileActiveOrder(storedOrder, activeZones) {
+    let order = [];
+    let seen = new Set();
+
+    storedOrder.forEach((zone) => {
+      if (this._stateByZone.has(zone) && !seen.has(zone)) {
+        order.push(zone);
+        seen.add(zone);
+      }
+    });
+
+    activeZones.forEach((zone) => {
+      if (!seen.has(zone)) {
+        order.push(zone);
+        seen.add(zone);
+      }
+    });
+
+    return order;
   }
 
   // Strips control/bidi/zero-width characters that must never reach an
@@ -227,17 +301,14 @@ export default class TimezonesExtension extends Extension {
   }
 
   _saveSettings() {
-    if (!this._settings || !this._state || !this._config || !this._labels) {
+    if (!this._settings || !this._state || !this._config || !this._labels || !this._activeOrder) {
       return;
     }
 
-    this._settings.set_value(
-      'timezones',
-      new GLib.Variant(
-        'as',
-        this._state.filter((item) => item.active).map((item) => item.timezone)
-      )
-    );
+    // Feature A: this._activeOrder is now the single source of truth for
+    // both membership (which zones are active) and display order, so it's
+    // written verbatim -- no re-deriving/re-sorting from this._state.
+    this._settings.set_value('timezones', new GLib.Variant('as', this._activeOrder));
 
     this._settings.set_value('config', new GLib.Variant('a{sb}', this._config));
     this._settings.set_value('labels', new GLib.Variant('a{ss}', this._labels));
@@ -254,7 +325,31 @@ export default class TimezonesExtension extends Extension {
     this._addConfigSwitch({ label: 'Show city name', name: 'showCity' });
     this._addConfigSwitch({ label: 'Show timezone', name: 'showTimezone' });
     this._addConfigSwitch({ label: 'Hide system clock', name: 'hideSystemClock' });
+    this._addConfigSwitch({ label: 'Show separator', name: 'showSeparator' });
     this._activeMenu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem('Active clocks'));
+
+    // Feature A (DnD, end-of-list drop): the active section's box actor is
+    // created once by _createScrollableMenuSection() and persists across
+    // _updateActiveMenu()'s removeAll() calls (only the menu ITEMS inside
+    // it are destroyed/rebuilt), so it's a stable drop target for "drop
+    // below the last row" -- always inserts at the end of this._activeOrder.
+    // ASSUMPTION (flagged for runtime verification): dnd.js resolves a drop
+    // target by walking up from the actor under the pointer to find one
+    // whose `_delegate` implements handleDragOver/acceptDrop; setting
+    // `_delegate` directly on this plain box actor is the standard pattern
+    // used elsewhere in GNOME Shell/extensions for drop targets that are
+    // not themselves the drag source.
+    this._activeMenu.box._delegate = {
+      handleDragOver: () => DND.DragMotionResult.MOVE_DROP,
+      acceptDrop: (source) => {
+        let zoneId = this._getDragSourceZone(source);
+        if (!zoneId) {
+          return false;
+        }
+        this._reorderActiveZone(zoneId, this._activeOrder.length);
+        return true;
+      }
+    };
 
     let inputFilter = new St.Entry({ width: 300, can_focus: true });
     inputFilter.clutter_text.connect('text-changed', (o) => {
@@ -332,16 +427,19 @@ export default class TimezonesExtension extends Extension {
     return menu;
   }
 
+  // Feature A: iterates this._activeOrder (not this._state) so the panel
+  // text reflects the user's chosen order rather than alphabetical.
+  // Feature B: joins with ' | ' when showSeparator is on, the original
+  // four-space gap otherwise -- a plain array-join now that order comes
+  // from an explicit list instead of a filter over this._state.
   _updateLabel() {
-    let text = '';
-    this._state.forEach((item) => (text += item.active ? `    ${this._getLabelForTimezone({ item: item })}` : ''));
-    text = text.trim();
+    let texts = this._activeOrder
+      .map((zone) => this._stateByZone.get(zone))
+      .filter((item) => item !== undefined)
+      .map((item) => this._getLabelForTimezone({ item: item }));
 
-    if (text.length === 0) {
-      text = '...';
-    }
-
-    this._label.text = text;
+    let separator = this._config.showSeparator ? ' | ' : '    ';
+    this._label.text = texts.length > 0 ? texts.join(separator) : '...';
   }
 
   // `nameOverride`, when given, is a matched search-result alias display
@@ -382,18 +480,116 @@ export default class TimezonesExtension extends Extension {
     this._state.forEach((item) => (item.label = this._getLabelForTimezone({ item: item, full: true })));
   }
 
+  // Feature A: iterates this._activeOrder (the authoritative display
+  // order) instead of filtering this._state, resolving each zone id via
+  // this._stateByZone. Each row is built with its current index so its
+  // drop-target handler can compute an insertion index without a linear
+  // search back through this._activeOrder.
   _updateActiveMenu() {
     this._activeMenu.removeAll();
 
-    this._state.filter((item) => item.active).forEach((item) => this._addActiveMenuRow(item, ACTIVE_MARK));
+    this._activeOrder.forEach((zone, index) => {
+      let item = this._stateByZone.get(zone);
+      if (item) {
+        this._addActiveMenuRow(item, ACTIVE_MARK, index);
+      }
+    });
   }
 
-  // Builds one active-clock row as a custom PopupBaseMenuItem: a label
-  // (checkmark + time, or an inline St.Entry while editing) plus a small
-  // edit button. Replaces the previous addAction() rows so the label can
-  // be swapped for an editable St.Entry per row.
-  _addActiveMenuRow(item, activeMark) {
+  // Builds one active-clock row as a custom PopupBaseMenuItem: a drag
+  // handle, a label (checkmark + time, or an inline St.Entry while
+  // editing), and a small edit button. Replaces the previous addAction()
+  // rows so the label can be swapped for an editable St.Entry per row.
+  // `rowIndex` is this row's current position in this._activeOrder, used
+  // by its drop-target handler to compute an insertion index.
+  _addActiveMenuRow(item, activeMark, rowIndex) {
     let menuItem = new PopupMenu.PopupBaseMenuItem();
+
+    // --- Feature A: drag-and-drop reorder ---
+    //
+    // DESIGN DECISION: makeDraggable() is attached to the drag-HANDLE icon
+    // only, not to the whole row. The task explicitly allows this as the
+    // safer fallback ("restrict makeDraggable to the drag-handle actor
+    // instead of the whole row") and it's the choice made here: the row
+    // (`menuItem`) already owns its own button-press/release handling for
+    // 'activate' (toggle-off) via PopupBaseMenuItem, and a second listener
+    // from _Draggable on the SAME actor for the SAME events is a real risk
+    // of breaking click-to-toggle or the edit button in ways that can't be
+    // statically verified from source alone (Clutter/GObject boolean-return
+    // signal accumulators can stop later handlers on the same actor from
+    // running at all, depending on connection order and return values).
+    // Scoping the draggable to a small dedicated handle actor sidesteps
+    // that risk entirely: clicks on the label/edit button are completely
+    // unaffected, and dragging only starts from a press-and-drag on the
+    // handle. The visible trade-off is that only the handle icon (not the
+    // full row) is cloned as the floating drag actor by dnd.js's default
+    // getDragActor() behavior -- acceptable for this affordance.
+    //
+    // ICON RISK (flag for runtime verification): 'list-drag-handle-symbolic'
+    // is used below on the assumption it exists in the running icon theme.
+    // This cannot be confirmed from a static read of this repo. If it
+    // renders as a missing-icon glyph, swap the icon_name (e.g. to
+    // 'open-menu-symbolic' or another always-present symbolic icon) --
+    // the DnD wiring itself does not depend on which icon is shown.
+    let dragIcon = new St.Icon({
+      icon_name: 'list-drag-handle-symbolic',
+      style_class: 'popup-menu-icon'
+    });
+    let dragHandle = new St.Button({
+      style_class: 'button',
+      child: dragIcon,
+      reactive: true,
+      can_focus: true,
+      track_hover: true
+    });
+    menuItem.add_child(dragHandle);
+
+    // Tag the handle actor directly with the zone id it represents, and
+    // pre-set its own _delegate to itself. ASSUMPTION (flag for runtime
+    // verification): dnd.js's _Draggable only sets `actor._delegate = this`
+    // if `actor._delegate` is not already set, so pre-setting it here means
+    // acceptDrop's `source` argument (whatever exact object dnd.js passes --
+    // the convention is not 100% certain from static reading alone) should
+    // resolve to `dragHandle` either directly or via a `_delegate` hop;
+    // _getDragSourceZone() below checks both shapes defensively so the
+    // reorder still works even if the exact resolution differs from this
+    // assumption.
+    dragHandle.dragZoneId = item.timezone;
+    dragHandle._delegate = dragHandle;
+
+    let draggable = DND.makeDraggable(dragHandle, { restoreOnSuccess: false, manualMode: false });
+    // Handlers exist per the drag-begin/drag-end requirement; currently
+    // no-ops beyond documenting intent -- there is no extra visual/drag
+    // state to clean up since _updateActiveMenu() fully rebuilds every row
+    // (including this one) after a successful drop via _reorderActiveZone().
+    draggable.connect('drag-begin', () => {});
+    draggable.connect('drag-end', () => {});
+
+    // Each row is itself a drop target (for reordering onto/around it);
+    // the active section's box (see _initMenu) is the separate end-of-list
+    // target. Insertion index: above this row's vertical midpoint inserts
+    // before it (at rowIndex), below inserts after it (at rowIndex + 1).
+    // ASSUMPTION (flag for runtime verification): handleDragOver/acceptDrop
+    // living on `menuItem._delegate` is the standard dnd.js drop-target
+    // convention (target actor found by walking up from the pointer
+    // position; its `_delegate.handleDragOver`/`.acceptDrop` are called).
+    menuItem._delegate = {
+      handleDragOver: () => DND.DragMotionResult.MOVE_DROP,
+      acceptDrop: (source, actor, x, y) => {
+        let zoneId = this._getDragSourceZone(source);
+        if (!zoneId) {
+          return false;
+        }
+
+        let [, rowY] = menuItem.get_transformed_position();
+        let rowHeight = menuItem.get_height();
+        let droppedBelowMidpoint = rowHeight > 0 && y - rowY > rowHeight / 2;
+        let targetIndex = rowIndex + (droppedBelowMidpoint ? 1 : 0);
+
+        this._reorderActiveZone(zoneId, targetIndex);
+        return true;
+      }
+    };
 
     let label = new St.Label({
       text: `${activeMark} ${item.label}`,
@@ -410,6 +606,12 @@ export default class TimezonesExtension extends Extension {
     });
     menuItem.add_child(entry);
 
+    // No interaction with the DnD wiring above: the edit button is a
+    // distinct St.Button actor from dragHandle, with its own independent
+    // button-press/release handling (same reasoning as the existing
+    // St.Button-consumes-its-own-events comment on editButton.connect(...)
+    // below applies equally to dragHandle). Dragging never starts a rename,
+    // and committing/cancelling a rename never triggers a drag.
     let editIcon = new St.Icon({
       icon_name: 'document-edit-symbolic',
       style_class: 'popup-menu-icon'
@@ -561,8 +763,29 @@ export default class TimezonesExtension extends Extension {
     return candidate.key < current.key;
   }
 
+  // Feature A: toggling on appends to the end of this._activeOrder (new
+  // clocks join at the end, not alphabetically); toggling off removes the
+  // zone from it. Renaming a zone never goes through this method, so
+  // position is naturally preserved across renames. The indexOf guard on
+  // the activate path is defense-in-depth for the this._activeOrder
+  // no-duplicates invariant (see _reconcileActiveOrder): in normal UI
+  // flow this is only ever called to activate a currently-inactive item,
+  // so the guard should be a no-op, but it keeps this method idempotent
+  // regardless, matching _activateWithAlias's existing guard.
   _toggleTimezone(item) {
     item.active = !item.active;
+
+    if (item.active) {
+      if (this._activeOrder.indexOf(item.timezone) === -1) {
+        this._activeOrder.push(item.timezone);
+      }
+    } else {
+      let index = this._activeOrder.indexOf(item.timezone);
+      if (index !== -1) {
+        this._activeOrder.splice(index, 1);
+      }
+    }
+
     this._updateLabel();
     this._saveSettings();
   }
@@ -571,9 +794,15 @@ export default class TimezonesExtension extends Extension {
   // one step (sanitize -> set -> activate -> single save -> refresh panel),
   // so the panel immediately shows the alias (e.g. "Seattle") instead of
   // requiring two separate settings writes. This intentionally overwrites
-  // any label previously stored for the zone.
+  // any label previously stored for the zone. Feature A: also appends to
+  // this._activeOrder like _toggleTimezone's activate path (this method is
+  // only ever called on a currently-inactive item, but the indexOf guard
+  // keeps it idempotent/safe regardless).
   _activateWithAlias(item, displayName) {
     item.active = true;
+    if (this._activeOrder.indexOf(item.timezone) === -1) {
+      this._activeOrder.push(item.timezone);
+    }
 
     let sanitized = this._sanitizeLabel(displayName);
     if (sanitized.length > 0) {
@@ -586,8 +815,52 @@ export default class TimezonesExtension extends Extension {
     this._saveSettings();
   }
 
+  // Moves zoneId to targetIndex within this._activeOrder. Splicing out the
+  // old entry shifts every later index down by one, so when the old
+  // position is BEFORE targetIndex, the effective insertion index must be
+  // decremented by one to land in the intended visual slot -- e.g. order
+  // [A, B, C], moving A to "after C" (targetIndex 3) must insert at index 2
+  // (post-removal length), not 3, or it would be clamped past the end and
+  // silently behave like appending past a now-shorter array. Used by both
+  // the per-row and end-of-list drop targets; produces exactly one
+  // _saveSettings() + one _updateLabel() + one _updateActiveMenu() call
+  // per completed drop, not per intermediate drag-over event (those only
+  // return a DragMotionResult and never touch this._activeOrder).
+  _reorderActiveZone(zoneId, targetIndex) {
+    let oldIndex = this._activeOrder.indexOf(zoneId);
+    if (oldIndex === -1) {
+      return;
+    }
+
+    this._activeOrder.splice(oldIndex, 1);
+
+    let insertAt = oldIndex < targetIndex ? targetIndex - 1 : targetIndex;
+    insertAt = Math.max(0, Math.min(insertAt, this._activeOrder.length));
+
+    this._activeOrder.splice(insertAt, 0, zoneId);
+
+    this._saveSettings();
+    this._updateLabel();
+    this._updateActiveMenu();
+  }
+
+  // Resolves the zone id being dragged from dnd.js's `source` argument.
+  // ASSUMPTION (flag for runtime verification): the exact shape of `source`
+  // passed to acceptDrop/handleDragOver by this GNOME Shell version's
+  // dnd.js is not confirmed from static reading alone -- it may be the
+  // dragged actor itself, or its `_delegate`. Both shapes resolve here
+  // because dragHandle.dragZoneId is set directly on the handle actor AND
+  // dragHandle._delegate === dragHandle (see _addActiveMenuRow).
+  _getDragSourceZone(source) {
+    if (!source) {
+      return null;
+    }
+    return source.dragZoneId ?? source._delegate?.dragZoneId ?? null;
+  }
+
   _clearClocks() {
     this._state.forEach((item) => (item.active = false));
+    this._activeOrder = [];
     this._updateMenu();
     this._updateLabel();
     this._saveSettings();

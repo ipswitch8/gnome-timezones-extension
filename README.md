@@ -20,6 +20,7 @@ There is already an excellent [MultiClock](https://github.com/mibus/MultiClock) 
 - Click on a clock to make it active. 
 - Click on an active clock to deactivate it. 
 - You can search/filter for a timezone using the input field.
+- Drag the handle on an active clock row to reorder your active clocks (or use the same handle as a fallback affordance if drag-and-drop doesn't behave well inside the panel menu). The order you choose is used both in the panel and in the Active clocks menu section.
 - [Configure it](#configuration) as you wish.
 
 ![Gnome Timezones extension](/screenshot.jpg)
@@ -29,6 +30,7 @@ There is already an excellent [MultiClock](https://github.com/mibus/MultiClock) 
 - **24 hours format**: Toggle between 24 and 12 hours format. Defaults to 24.
 - **Show city name**: Controls if in the clock shows the city name before the time. Defaults to true.
 - **Show timezone**: Shows the timezone before the time and after the City name if it is shown. Defaults to false.
+- **Show separator**: Joins the panel clocks with ` | ` instead of the default spacing. Defaults to false. Only affects the panel label, not the menu rows.
 - **Clear clocks**: It will deactivate all current active clocks. In case you can't remove a clock, you can use this button to clear all clocks.
 
 ## Contributing
@@ -44,7 +46,7 @@ $ git clone git@github.com:Masquerade-Circus/gnome-timezones-extension.git timez
 
 ### Development
 
-The extension has no dependencies and no `package.json`/bundler — `extension.js` and `timezones.js` are loaded by GNOME Shell as-is. Useful commands while developing:
+The extension has no dependencies and no `package.json`/bundler — `extension.js` and `timezones.js` are loaded by GNOME Shell as-is. Active-clock reordering uses GNOME Shell's built-in `resource:///org/gnome/shell/ui/dnd.js` module (`DND.makeDraggable` on a per-row drag handle); this is a stable Shell-internal module, not a new dependency. Useful commands while developing:
 
 - `journalctl -f -o cat /usr/bin/gnome-shell`: Watch the GNOME Shell log for errors.
 - `gnome-extensions enable timezones@masquerade-circus.net`: Enable the extension.
