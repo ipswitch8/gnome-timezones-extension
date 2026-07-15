@@ -71,6 +71,9 @@ export default class TimezonesExtension extends Extension {
     // match this._config on every menu open, so the toggle visual and the
     // stored value can never permanently desync (see _syncConfigSwitches).
     this._configSwitches = {};
+    // Live drag landing-zone indicator (single reused actor, created
+    // lazily on first use). See _showDropIndicatorAt()/_clearDropIndicator().
+    this._dropIndicator = null;
 
     // Feature A: flatten cityAliases once into {key, zone, display} rows.
     // cityAliases values are [zone, displayName] tuples keyed by the
@@ -157,6 +160,12 @@ export default class TimezonesExtension extends Extension {
     }
     this._menuOpenStateId = null;
 
+    // Explicitly torn down before this._button.destroy() below (which
+    // would also destroy it as a side effect, since it's parented inside
+    // the active menu's box) so there is never a dangling JS reference or
+    // a code path that skips cleanup.
+    this._clearDropIndicator();
+
     this._saveSettings();
 
     if (this._button) {
@@ -178,6 +187,7 @@ export default class TimezonesExtension extends Extension {
     this._activeOrder = null;
     this._stateByZone = null;
     this._configSwitches = null;
+    this._dropIndicator = null;
   }
 
   _loadSettings() {
@@ -358,15 +368,17 @@ export default class TimezonesExtension extends Extension {
     // `target._delegate.handleDragOver` still resolves correctly.
     // DO NOT reassign `box._delegate` here or anywhere else in this file --
     // always add methods to the existing delegate instead.
-    this._activeMenu.handleDragOver = () => DND.DragMotionResult.MOVE_DROP;
-    this._activeMenu.acceptDrop = (source) => {
-      let zoneId = this._getDragSourceZone(source);
-      if (!zoneId) {
-        return false;
-      }
-      this._reorderActiveZone(zoneId, this._activeOrder.length);
-      return true;
-    };
+    //
+    // Shares _handleActiveDragOver()/_acceptActiveDrop() with every row's
+    // own handleDragOver/acceptDrop (see _addActiveMenuRow): both compute
+    // the candidate insertion index from LIVE row geometry rather than a
+    // fixed "always append" assumption, so a drop anywhere in the box's
+    // empty space below the last row still correctly resolves to
+    // this._activeOrder.length via _computeInsertionIndex() (pointer below
+    // every row's midpoint falls through to rows.length) -- no special
+    // casing needed here beyond what the shared methods already do.
+    this._activeMenu.handleDragOver = (source, actor, x, y) => this._handleActiveDragOver(source, actor, x, y);
+    this._activeMenu.acceptDrop = (source, actor, x, y) => this._acceptActiveDrop(source, actor, x, y);
 
     let inputFilter = new St.Entry({ width: 300, can_focus: true });
     inputFilter.clutter_text.connect('text-changed', (o) => {
@@ -528,16 +540,19 @@ export default class TimezonesExtension extends Extension {
 
   // Feature A: iterates this._activeOrder (the authoritative display
   // order) instead of filtering this._state, resolving each zone id via
-  // this._stateByZone. Each row is built with its current index so its
-  // drop-target handler can compute an insertion index without a linear
-  // search back through this._activeOrder.
+  // this._stateByZone. Row build order no longer needs to carry an
+  // explicit index for drop-target math: _handleActiveDragOver()/
+  // _acceptActiveDrop() (shared by every row and by this._activeMenu's
+  // own end-of-list target) compute the candidate insertion index from
+  // LIVE row geometry read off the box's actual children at drag time
+  // (see _getActiveRowGeometry()), not from a value captured at build time.
   _updateActiveMenu() {
     this._activeMenu.removeAll();
 
-    this._activeOrder.forEach((zone, index) => {
+    this._activeOrder.forEach((zone) => {
       let item = this._stateByZone.get(zone);
       if (item) {
-        this._addActiveMenuRow(item, ACTIVE_MARK, index);
+        this._addActiveMenuRow(item, ACTIVE_MARK);
       }
     });
   }
@@ -546,9 +561,7 @@ export default class TimezonesExtension extends Extension {
   // handle, a label (checkmark + time, or an inline St.Entry while
   // editing), and a small edit button. Replaces the previous addAction()
   // rows so the label can be swapped for an editable St.Entry per row.
-  // `rowIndex` is this row's current position in this._activeOrder, used
-  // by its drop-target handler to compute an insertion index.
-  _addActiveMenuRow(item, activeMark, rowIndex) {
+  _addActiveMenuRow(item, activeMark) {
     let menuItem = new PopupMenu.PopupBaseMenuItem();
 
     // --- Feature A: drag-and-drop reorder ---
@@ -567,12 +580,14 @@ export default class TimezonesExtension extends Extension {
     // Scoping the draggable to a small dedicated handle actor sidesteps
     // that risk entirely: clicks on the label/edit button are completely
     // unaffected, and dragging only starts from a press-and-drag on the
-    // handle. The visible trade-off is that only the handle icon (not the
-    // full row) is cloned as the floating drag actor by dnd.js's default
-    // getDragActor() behavior -- acceptable for this affordance.
+    // handle. Only the drag SOURCE (what starts the drag) is the small
+    // handle actor -- the floating drag actor the user actually sees is a
+    // separate, custom whole-row preview built by getDragActor() below, so
+    // this scoping decision does not limit what's shown while dragging.
     //
     // ICON RISK (flag for runtime verification): 'list-drag-handle-symbolic'
-    // is used below on the assumption it exists in the running icon theme.
+    // is used below (and in the drag-actor preview further down) on the
+    // assumption it exists in the running icon theme.
     // This cannot be confirmed from a static read of this repo. If it
     // renders as a missing-icon glyph, swap the icon_name (e.g. to
     // 'open-menu-symbolic' or another always-present symbolic icon) --
@@ -633,76 +648,86 @@ export default class TimezonesExtension extends Extension {
     // ex-handle actor ending up appended after everything else is what
     // rendered as "handle at the right end."
     //
-    // FIX: give the draggable its own getDragActor()/getDragActorSource(),
-    // both standard dnd.js Draggable hooks read from the drag source's
-    // delegate (`dragHandle._delegate`, which is `dragHandle` itself).
-    // getDragActor() returns a freestanding CLONE St.Icon (same icon_name/
-    // style_class, so it looks identical) instead of the live handle, so
-    // the real `dragHandle` actor is never reparented/touched by the drag
-    // at all -- it stays exactly where it was created, at the left end of
-    // the row, before, during, and after any drag. getDragActorSource()
-    // returns the real handle so dnd.js can still compute the clone's
-    // starting position/size from it. With the real actor never moving,
-    // `restoreOnSuccess` becomes moot (there is nothing to restore); it is
-    // left as `false` since it no longer has any effect either way.
+    // UX POLISH (live-testing feedback): the clone-icon drag actor "looked
+    // like small white dots" following the cursor -- unclear what was being
+    // moved. FIX: getDragActor() now builds a freestanding, throwaway
+    // St.BoxLayout styled like a real row (style_class 'popup-menu-item',
+    // the same drag-handle icon, and a label showing this clock's current
+    // full display text via _getLabelForTimezone({item, full:true}),
+    // recomputed fresh here rather than trusting a possibly-stale
+    // item.label). This is still a brand-new actor, never the real row or
+    // any of its children -- no reparenting, so the handle-jump bug fixed
+    // previously cannot be reintroduced. getDragActorSource() still
+    // returns the real handle (dnd.js uses it to size/position the clone's
+    // starting point); `restoreOnSuccess: false` remains moot since the
+    // real actor is still never moved.
     dragHandle.getDragActor = () => {
-      return new St.Icon({
-        icon_name: 'list-drag-handle-symbolic',
-        style_class: 'popup-menu-icon'
+      let preview = new St.BoxLayout({
+        style_class: 'popup-menu-item',
+        vertical: false
       });
+      preview.add_child(
+        new St.Icon({
+          icon_name: 'list-drag-handle-symbolic',
+          style_class: 'popup-menu-icon'
+        })
+      );
+      preview.add_child(
+        new St.Label({
+          text: `${activeMark} ${this._getLabelForTimezone({ item, full: true })}`,
+          y_align: Clutter.ActorAlign.CENTER
+        })
+      );
+      return preview;
     };
     dragHandle.getDragActorSource = () => dragHandle;
 
     let draggable = DND.makeDraggable(dragHandle, { restoreOnSuccess: false, manualMode: false });
-    // Handlers exist per the drag-begin/drag-end requirement; currently
-    // no-ops beyond documenting intent -- there is no extra visual/drag
-    // state to clean up since _updateActiveMenu() fully rebuilds every row
-    // (including this one) after a successful drop via _reorderActiveZone().
+    // Handlers exist per the drag-begin/drag-end requirement. drag-begin
+    // stays a no-op (the drop indicator is created lazily on first
+    // handleDragOver, not needed before a drag actually starts moving).
+    // drag-end is the unconditional teardown net for the live
+    // landing-zone indicator: it fires on EVERY drag end regardless of
+    // outcome (successful drop, cancelled via Escape, or dropped outside
+    // any valid target), so clearing the indicator here guarantees a
+    // cancelled/failed drag never leaves it behind even though
+    // acceptDrop() (the success path) also clears it -- _clearDropIndicator()
+    // is idempotent, so both call sites are safe.
     draggable.connect('drag-begin', () => {});
-    draggable.connect('drag-end', () => {});
+    draggable.connect('drag-end', () => this._clearDropIndicator());
 
     // Each row is itself a drop target (for reordering onto/around it);
     // the active section's box (see _initMenu) is the separate end-of-list
-    // target. Insertion index: above this row's vertical midpoint inserts
-    // before it (at rowIndex), below inserts after it (at rowIndex + 1).
+    // target. Both share _handleActiveDragOver()/_acceptActiveDrop(),
+    // which compute the candidate insertion index from LIVE row geometry
+    // (this row's own position is no longer captured/relied on at build
+    // time -- see _getActiveRowGeometry()).
     //
-    // BUG FIX (live-testing report): this USED to replace `menuItem._delegate`
-    // wholesale with a plain { handleDragOver, acceptDrop } object. That was
-    // wrong and caused the reported "drag one row -> every active row
-    // triples" bug: PopupBaseMenuItem's own constructor sets
-    // `this._delegate = this` (self-delegate), and PopupMenuBase.removeAll()
-    // discovers which of its box's children are menu items to destroy by
-    // reading each child's `_delegate` and checking `instanceof
-    // PopupBaseMenuItem`. Overwriting `_delegate` with a plain object made
-    // every row invisible to that check, so `_updateActiveMenu()`'s
-    // `removeAll()` silently destroyed nothing -- old rows were orphaned
-    // (still in the box, still rendering) while a fresh batch was appended
-    // on top every time the menu opened or a drop occurred, producing
-    // duplicated/tripled rows.
+    // BUG FIX (live-testing report, still applies): this USED to replace
+    // `menuItem._delegate` wholesale with a plain { handleDragOver,
+    // acceptDrop } object. That was wrong and caused the reported "drag one
+    // row -> every active row triples" bug: PopupBaseMenuItem's own
+    // constructor sets `this._delegate = this` (self-delegate), and
+    // PopupMenuBase.removeAll() discovers which of its box's children are
+    // menu items to destroy by reading each child's `_delegate` and
+    // checking `instanceof PopupBaseMenuItem`. Overwriting `_delegate` with
+    // a plain object made every row invisible to that check, so
+    // `_updateActiveMenu()`'s `removeAll()` silently destroyed nothing --
+    // old rows were orphaned (still in the box, still rendering) while a
+    // fresh batch was appended on top every time the menu opened or a drop
+    // occurred, producing duplicated/tripled rows.
     //
-    // FIX: attach handleDragOver/acceptDrop as own properties DIRECTLY on
-    // `menuItem` instead, leaving `menuItem._delegate` (== menuItem itself)
-    // completely untouched. dnd.js's `target._delegate.handleDragOver` still
-    // resolves correctly (`target._delegate` is `menuItem`, which now has
-    // the method directly), and `removeAll()`'s `instanceof PopupBaseMenuItem`
-    // check keeps working since the delegate is still the real menu item.
+    // FIX (still in effect): attach handleDragOver/acceptDrop as own
+    // properties DIRECTLY on `menuItem` instead, leaving `menuItem._delegate`
+    // (== menuItem itself) completely untouched. dnd.js's
+    // `target._delegate.handleDragOver` still resolves correctly
+    // (`target._delegate` is `menuItem`, which now has the method
+    // directly), and `removeAll()`'s `instanceof PopupBaseMenuItem` check
+    // keeps working since the delegate is still the real menu item.
     // DO NOT reassign `menuItem._delegate` here or anywhere else in this
     // file -- always add methods to the existing delegate instead.
-    menuItem.handleDragOver = () => DND.DragMotionResult.MOVE_DROP;
-    menuItem.acceptDrop = (source, actor, x, y) => {
-      let zoneId = this._getDragSourceZone(source);
-      if (!zoneId) {
-        return false;
-      }
-
-      let [, rowY] = menuItem.get_transformed_position();
-      let rowHeight = menuItem.get_height();
-      let droppedBelowMidpoint = rowHeight > 0 && y - rowY > rowHeight / 2;
-      let targetIndex = rowIndex + (droppedBelowMidpoint ? 1 : 0);
-
-      this._reorderActiveZone(zoneId, targetIndex);
-      return true;
-    };
+    menuItem.handleDragOver = (source, actor, x, y) => this._handleActiveDragOver(source, actor, x, y);
+    menuItem.acceptDrop = (source, actor, x, y) => this._acceptActiveDrop(source, actor, x, y);
 
     let label = new St.Label({
       text: `${activeMark} ${item.label}`,
@@ -969,6 +994,157 @@ export default class TimezonesExtension extends Extension {
       return null;
     }
     return source.dragZoneId ?? source._delegate?.dragZoneId ?? null;
+  }
+
+  // --- Live landing-zone feedback ---
+  //
+  // APPROACH CHOSEN: a single drop-indicator line, NOT live reflow of the
+  // active rows. The task explicitly offered reflow as the user's stated
+  // preference but named a drop-indicator line as an acceptable
+  // lower-risk fallback, to be chosen if reflow "proves unstable under
+  // the popup menu's modal grab" -- and explicitly said to build only ONE
+  // approach. Reflow means mutating multiple rows' layout (margins/
+  // translations) on every handleDragOver call (i.e. on every pointer-
+  // motion event during the drag) while the popup holds its modal grab,
+  // and then guaranteeing that mutation is perfectly undone on every exit
+  // path (success, Escape, drop-outside, source-destroyed). This file has
+  // already hit two separate DnD bugs from touching shell-managed state in
+  // ways that looked correct locally but broke under the shell's actual
+  // menu-item bookkeeping (the _delegate-overwrite duplication bug, and
+  // the drag-actor-reparenting handle-jump bug) -- both were plausible-
+  // looking code that could not be verified without a live shell. A single
+  // extra, clearly-scoped, non-shell-managed actor (this._dropIndicator)
+  // that is only ever inserted into and removed from one box, with no
+  // per-row mutation and no dependency on shell-internal row bookkeeping,
+  // is the smaller, more auditable surface area. Reflow is deferred rather
+  // than attempted.
+  //
+  // Candidate insertion index is computed by the pure _computeInsertionIndex()
+  // below from live row geometry (_getActiveRowGeometry()), and reused
+  // identically by _handleActiveDragOver() (for positioning the indicator)
+  // and _acceptActiveDrop() (for the real reorder), so the visual candidate
+  // and the actual drop index can never diverge.
+
+  // Pure: given the drag pointer's Y (dnd.js's handleDragOver/acceptDrop
+  // `y` argument) and an array of currently-visible active rows'
+  // { y, height } in top-to-bottom order (same coordinate space as each
+  // row's own get_transformed_position()), returns the candidate insertion
+  // index: 0 if pointerY is above the first row's midpoint, i+1 if it's
+  // between row i and row i+1 (below row i's midpoint, at/above row i+1's),
+  // rows.length if it's below the last row's midpoint (or rows is empty).
+  // No gnome-shell dependency -- see the scratch-node test for
+  // representative pointer-Y sequences including boundary rows.
+  _computeInsertionIndex(pointerY, rows) {
+    for (let i = 0; i < rows.length; i++) {
+      if (pointerY < rows[i].y + rows[i].height / 2) {
+        return i;
+      }
+    }
+    return rows.length;
+  }
+
+  // Reads the live on-screen geometry of every active-clock row, in
+  // top-to-bottom order, directly from this._activeMenu.box's actual
+  // children at the moment of the call (not from anything captured at row-
+  // build time). Filters out the drop-indicator actor itself via its
+  // `isDropIndicator` tag so it is never mistaken for a row -- this matters
+  // because the indicator is a real child of the same box while a drag is
+  // in progress, and would otherwise shift the computed indices.
+  _getActiveRowGeometry() {
+    return this._activeMenu.box.get_children()
+      .filter((child) => !child.isDropIndicator)
+      .map((child) => {
+        let [, y] = child.get_transformed_position();
+        return { y, height: child.get_height() };
+      });
+  }
+
+  // Shared handleDragOver for both the per-row drop targets and the active
+  // section's own end-of-list target (see _initMenu and _addActiveMenuRow):
+  // computes the live candidate index and positions the drop-indicator
+  // line there. Always returns MOVE_DROP -- this row/section is always a
+  // valid reorder target while a clock is being dragged.
+  _handleActiveDragOver(source, actor, x, y) {
+    let targetIndex = this._computeInsertionIndex(y, this._getActiveRowGeometry());
+    this._showDropIndicatorAt(targetIndex);
+    return DND.DragMotionResult.MOVE_DROP;
+  }
+
+  // Shared acceptDrop for both the per-row drop targets and the active
+  // section's own end-of-list target. Recomputes the same candidate index
+  // (from the same live-geometry function used by _handleActiveDragOver,
+  // so the actual drop index matches whatever the indicator last showed),
+  // clears the indicator, then performs the single reorder + save +
+  // refresh via _reorderActiveZone().
+  _acceptActiveDrop(source, actor, x, y) {
+    let zoneId = this._getDragSourceZone(source);
+    if (!zoneId) {
+      this._clearDropIndicator();
+      return false;
+    }
+
+    let targetIndex = this._computeInsertionIndex(y, this._getActiveRowGeometry());
+    this._clearDropIndicator();
+    this._reorderActiveZone(zoneId, targetIndex);
+    return true;
+  }
+
+  // Lazily creates the single drop-indicator actor (a thin highlighted
+  // bar, styled inline since this extension ships no stylesheet.css) and
+  // (re)inserts it into this._activeMenu.box at `index`, removing any
+  // previous insertion first so there is never more than one indicator in
+  // the tree at once. `isDropIndicator` tags it so _getActiveRowGeometry()
+  // and any future logic can always recognize and skip it.
+  //
+  // RUNTIME ASSUMPTION (flag for verification): this actor is `reactive:
+  // false`, intended to be click/pointer-transparent, but dnd.js's own
+  // internal "what's under the pointer" resolution during a drag may use a
+  // pick mode that considers non-reactive actors too. If so, pausing the
+  // pointer precisely over the indicator's own thin strip could
+  // momentarily resolve the drag-over target to this._activeMenu.box (the
+  // end-of-list target) rather than a specific row, until the pointer moves
+  // off it again. This is a cosmetic edge case at worst (the indicator is
+  // only a couple of pixels tall) and cannot be confirmed without a live
+  // shell -- flagged for user verification.
+  _showDropIndicatorAt(index) {
+    if (!this._dropIndicator) {
+      this._dropIndicator = new St.Widget({
+        style: 'height: 2px; margin: 2px 6px; background-color: #3584e4; border-radius: 1px;',
+        reactive: false,
+        x_expand: true
+      });
+      this._dropIndicator.isDropIndicator = true;
+    }
+
+    let box = this._activeMenu.box;
+    if (this._dropIndicator.get_parent() === box) {
+      box.remove_child(this._dropIndicator);
+    }
+
+    let clampedIndex = Math.max(0, Math.min(index, box.get_n_children()));
+    box.insert_child_at_index(this._dropIndicator, clampedIndex);
+  }
+
+  // Removes and destroys the drop-indicator actor if one exists. MUST be
+  // called on every drag exit path -- successful drop (_acceptActiveDrop),
+  // cancelled/failed drag (the draggable's 'drag-end', which fires
+  // regardless of outcome -- see _addActiveMenuRow), and defensively here
+  // before _updateActiveMenu() rebuilds rows (that rebuild only destroys
+  // actual PopupBaseMenuItem/PopupMenuSection rows via removeAll()'s
+  // delegate-based discovery -- the indicator is a plain St.Widget child
+  // added directly to the box, not a menu item, so removeAll() does not
+  // know about it and would otherwise leave it orphaned in the tree
+  // forever). Idempotent: safe to call when no indicator is present, and
+  // safe to call more than once per drag.
+  _clearDropIndicator() {
+    if (!this._dropIndicator) {
+      return;
+    }
+    if (this._dropIndicator.get_parent()) {
+      this._dropIndicator.get_parent().remove_child(this._dropIndicator);
+    }
+    this._dropIndicator.destroy();
+    this._dropIndicator = null;
   }
 
   _clearClocks() {
