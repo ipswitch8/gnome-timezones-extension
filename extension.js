@@ -1050,6 +1050,18 @@ export default class TimezonesExtension extends Extension {
   // `isDropIndicator` tag so it is never mistaken for a row -- this matters
   // because the indicator is a real child of the same box while a drag is
   // in progress, and would otherwise shift the computed indices.
+  //
+  // KNOWN MINOR RISK (noted, not fixed -- out of scope per this fix):
+  // filtering the indicator OUT of this array prevents it from being
+  // counted as a row, but does not undo the fact that inserting it into
+  // the box physically shifts every REAL row below the insertion point
+  // down by the indicator's own height (a few px, since St.BoxLayout lays
+  // out children in a vertical stack). That could cause the candidate
+  // index to jitter by one right at a boundary as the indicator itself
+  // moves. Left as-is: fixing it cleanly would mean either reading
+  // geometry before the indicator affects layout or compensating for its
+  // height, and neither is obviously safe to do without live-shell
+  // verification, so it's flagged here rather than attempted.
   _getActiveRowGeometry() {
     return this._activeMenu.box.get_children()
       .filter((child) => !child.isDropIndicator)
@@ -1059,23 +1071,54 @@ export default class TimezonesExtension extends Extension {
       });
   }
 
+  // BUG FIX (live-testing report): the drop-indicator line always showed at
+  // the TOP of the list and never moved, even though the actual drop still
+  // landed correctly. ROOT CAUSE: the `y` dnd.js passes to
+  // handleDragOver/acceptDrop is in the TARGET ACTOR'S LOCAL coordinate
+  // space (it transforms the stage pointer into whichever actor's
+  // `_delegate` it's currently invoking -- roughly 0..rowHeight when over a
+  // row, or box-local when over the box), but _getActiveRowGeometry()
+  // builds row {y} from get_transformed_position(), which is STAGE
+  // (absolute) coordinates -- typically hundreds of px. Comparing a small
+  // local `y` against large stage `y` values in _computeInsertionIndex()
+  // meant `pointerY < rows[0].y + height/2` was true for basically any
+  // local y, so the computed index was always 0. The drop still landed in
+  // the right place only incidentally (whatever the final resolved index
+  // happened to be from other internal dnd.js state at release time) --
+  // not something to rely on.
+  //
+  // FIX: use global.get_pointer() (returns [stageX, stageY, mods] in
+  // absolute stage coordinates -- the standard GNOME Shell way to read the
+  // current pointer position) instead of the passed `y`, so the pointer Y
+  // and the row geometry are in the SAME coordinate space. The passed
+  // (x, y) params are kept in the method signatures (dnd.js still calls
+  // with them) but are no longer used for the index math.
+  // _computeInsertionIndex() itself is unchanged/still pure.
+  //
+  // RUNTIME NOTE: global.get_pointer() cannot be exercised outside a
+  // running GNOME Shell process, so this fix could not be scratch-tested
+  // the way _computeInsertionIndex() was -- flagged for user runtime
+  // re-verification (indicator should now track the pointer and land
+  // exactly where shown).
+
   // Shared handleDragOver for both the per-row drop targets and the active
   // section's own end-of-list target (see _initMenu and _addActiveMenuRow):
   // computes the live candidate index and positions the drop-indicator
   // line there. Always returns MOVE_DROP -- this row/section is always a
   // valid reorder target while a clock is being dragged.
   _handleActiveDragOver(source, actor, x, y) {
-    let targetIndex = this._computeInsertionIndex(y, this._getActiveRowGeometry());
+    let [, pointerY] = global.get_pointer();
+    let targetIndex = this._computeInsertionIndex(pointerY, this._getActiveRowGeometry());
     this._showDropIndicatorAt(targetIndex);
     return DND.DragMotionResult.MOVE_DROP;
   }
 
   // Shared acceptDrop for both the per-row drop targets and the active
   // section's own end-of-list target. Recomputes the same candidate index
-  // (from the same live-geometry function used by _handleActiveDragOver,
-  // so the actual drop index matches whatever the indicator last showed),
-  // clears the indicator, then performs the single reorder + save +
-  // refresh via _reorderActiveZone().
+  // (from the same live-geometry function AND the same stage-space pointer
+  // source used by _handleActiveDragOver, so the actual drop index matches
+  // whatever the indicator last showed), clears the indicator, then
+  // performs the single reorder + save + refresh via _reorderActiveZone().
   _acceptActiveDrop(source, actor, x, y) {
     let zoneId = this._getDragSourceZone(source);
     if (!zoneId) {
@@ -1083,7 +1126,8 @@ export default class TimezonesExtension extends Extension {
       return false;
     }
 
-    let targetIndex = this._computeInsertionIndex(y, this._getActiveRowGeometry());
+    let [, pointerY] = global.get_pointer();
+    let targetIndex = this._computeInsertionIndex(pointerY, this._getActiveRowGeometry());
     this._clearDropIndicator();
     this._reorderActiveZone(zoneId, targetIndex);
     return true;

@@ -17,10 +17,11 @@ There is already an excellent [MultiClock](https://github.com/mibus/MultiClock) 
 
 ## How to use
 
-- Click on a clock to make it active. 
-- Click on an active clock to deactivate it. 
-- You can search/filter for a timezone using the input field.
-- Drag the handle on an active clock row to reorder your active clocks (or use the same handle as a fallback affordance if drag-and-drop doesn't behave well inside the panel menu). The order you choose is used both in the panel and in the Active clocks menu section.
+- Click on a clock to make it active.
+- Click on an active clock to deactivate it.
+- **Search by city, not just timezone.** Type into the filter field and it matches city names as well as timezone IDs — searching `Seattle` surfaces `America/Los_Angeles`, `Osaka` surfaces `Asia/Tokyo`, and so on. The list is drawn from world cities with a population of 500,000 or more. Matches show the city name you searched for, and adding one from a search sets that city as the clock's label automatically.
+- **Rename any active clock.** Each active clock row has a pencil button — click it to type a custom label (e.g. `Home`, `Head Office`) that then shows in the panel and the menu. Submit with Enter; clear the field and press Enter to revert to the default name.
+- **Reorder by drag-and-drop.** Drag the handle on the left of an active clock row to move it. While dragging, the whole row follows the pointer and a line shows where it will land; the order you choose is used in both the panel and the Active clocks menu section.
 - [Configure it](#configuration) as you wish.
 
 ![Gnome Timezones extension](/screenshot.jpg)
@@ -28,8 +29,9 @@ There is already an excellent [MultiClock](https://github.com/mibus/MultiClock) 
 ## Configuration
 
 - **24 hours format**: Toggle between 24 and 12 hours format. Defaults to 24.
-- **Show city name**: Controls if in the clock shows the city name before the time. Defaults to true.
+- **Show city name**: Controls if in the clock shows the city name before the time. Defaults to true. Custom labels set via the pencil button take the place of the city name here.
 - **Show timezone**: Shows the timezone before the time and after the City name if it is shown. Defaults to false.
+- **Hide system clock**: Hides GNOME Shell's own clock text in the top bar (the date/calendar button itself stays, so notifications and the calendar remain reachable). Reverts immediately when toggled off, and the system clock always returns on the lock screen. Defaults to false.
 - **Show separator**: Joins the panel clocks with ` | ` instead of the default spacing. Defaults to false. Only affects the panel label, not the menu rows.
 - **Clear clocks**: It will deactivate all current active clocks. In case you can't remove a clock, you can use this button to clear all clocks.
 
@@ -46,7 +48,9 @@ $ git clone git@github.com:Masquerade-Circus/gnome-timezones-extension.git timez
 
 ### Development
 
-The extension has no dependencies and no `package.json`/bundler — `extension.js` and `timezones.js` are loaded by GNOME Shell as-is. Active-clock reordering uses GNOME Shell's built-in `resource:///org/gnome/shell/ui/dnd.js` module (`DND.makeDraggable` on a per-row drag handle); this is a stable Shell-internal module, not a new dependency. Useful commands while developing:
+The extension has no dependencies and no `package.json`/bundler — `extension.js`, `timezones.js`, and `cityAliases.js` are loaded by GNOME Shell as-is. Active-clock reordering uses GNOME Shell's built-in `resource:///org/gnome/shell/ui/dnd.js` module (`DND.makeDraggable` on a per-row drag handle); this is a stable Shell-internal module, not a new dependency.
+
+`cityAliases.js` (the city-name → timezone search index) is generated data, not hand-edited. Regenerate it with `tools/generate-city-aliases.py` (see `tools/README.md` for the GeoNames source and provenance). Useful commands while developing:
 
 - `journalctl -f -o cat /usr/bin/gnome-shell`: Watch the GNOME Shell log for errors.
 - `gnome-extensions enable timezones@masquerade-circus.net`: Enable the extension.
