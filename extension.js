@@ -66,6 +66,11 @@ export default class TimezonesExtension extends Extension {
     // only ever restores visibility it actually changed (see
     // _applySystemClockVisibility()).
     this._hidSystemClock = false;
+    // name -> PopupSwitchMenuItem, populated by _addConfigSwitch(). Lets
+    // _syncConfigSwitches() force every switch's visual state back to
+    // match this._config on every menu open, so the toggle visual and the
+    // stored value can never permanently desync (see _syncConfigSwitches).
+    this._configSwitches = {};
 
     // Feature A: flatten cityAliases once into {key, zone, display} rows.
     // cityAliases values are [zone, displayName] tuples keyed by the
@@ -172,6 +177,7 @@ export default class TimezonesExtension extends Extension {
     this._aliases = null;
     this._activeOrder = null;
     this._stateByZone = null;
+    this._configSwitches = null;
   }
 
   _loadSettings() {
@@ -333,22 +339,33 @@ export default class TimezonesExtension extends Extension {
     // _updateActiveMenu()'s removeAll() calls (only the menu ITEMS inside
     // it are destroyed/rebuilt), so it's a stable drop target for "drop
     // below the last row" -- always inserts at the end of this._activeOrder.
-    // ASSUMPTION (flagged for runtime verification): dnd.js resolves a drop
-    // target by walking up from the actor under the pointer to find one
-    // whose `_delegate` implements handleDragOver/acceptDrop; setting
-    // `_delegate` directly on this plain box actor is the standard pattern
-    // used elsewhere in GNOME Shell/extensions for drop targets that are
-    // not themselves the drag source.
-    this._activeMenu.box._delegate = {
-      handleDragOver: () => DND.DragMotionResult.MOVE_DROP,
-      acceptDrop: (source) => {
-        let zoneId = this._getDragSourceZone(source);
-        if (!zoneId) {
-          return false;
-        }
-        this._reorderActiveZone(zoneId, this._activeOrder.length);
-        return true;
+    //
+    // BUG FIX (live-testing report): this USED to overwrite
+    // `this._activeMenu.box._delegate` with a plain object. That was wrong:
+    // PopupMenuBase's constructor sets `this.box._delegate = this` (the
+    // PopupMenuSection instance itself), and that linkage matters for how
+    // the shell resolves/manages this section as a menu item elsewhere.
+    // Overwriting it is the same class of bug that caused the reported
+    // "one drag -> triple rows" issue for the per-row delegates (see the
+    // matching comment in _addActiveMenuRow): once `box._delegate` no
+    // longer points back to `this._activeMenu`, anything that relies on
+    // that link to identify/manage the section breaks silently.
+    //
+    // FIX: since `this._activeMenu.box._delegate === this._activeMenu`
+    // already (shell-managed, untouched), attach handleDragOver/acceptDrop
+    // as own properties DIRECTLY on `this._activeMenu` (the PopupMenuSection
+    // instance) instead of replacing the delegate. dnd.js's
+    // `target._delegate.handleDragOver` still resolves correctly.
+    // DO NOT reassign `box._delegate` here or anywhere else in this file --
+    // always add methods to the existing delegate instead.
+    this._activeMenu.handleDragOver = () => DND.DragMotionResult.MOVE_DROP;
+    this._activeMenu.acceptDrop = (source) => {
+      let zoneId = this._getDragSourceZone(source);
+      if (!zoneId) {
+        return false;
       }
+      this._reorderActiveZone(zoneId, this._activeOrder.length);
+      return true;
     };
 
     let inputFilter = new St.Entry({ width: 300, can_focus: true });
@@ -379,10 +396,25 @@ export default class TimezonesExtension extends Extension {
     });
   }
 
+  // BUG FIX (live-testing report): toggling a switch OFF flipped the
+  // visual but never persisted/applied -- ANCHOR FACT was that
+  // `gsettings get ... config` kept reading every key as true after
+  // turning switches off, i.e. the OFF write never reached settings.
+  // Re-reading _saveSettings()/this._config[name] assignment top to bottom
+  // found no `||`/truthy-default reconstruction and no obvious bug in the
+  // write path itself -- this._config is written to the 'a{sb}' variant
+  // verbatim. That points at the *input* to `this._config[name] = state`:
+  // `state`, the SIGNAL's emitted parameter, going through GObject signal
+  // marshaling. `item.state` (a plain property getter read directly off
+  // the PopupSwitchMenuItem instance after the toggle) is the more
+  // authoritative, lower-risk source of truth for "what is the switch
+  // actually set to right now" and is used instead, eliminating any
+  // possible mismatch between the two. Boolean(...) is applied explicitly
+  // so only a real primitive boolean is ever stored/persisted.
   _addConfigSwitch({ label, name }) {
     let configSwitch = new PopupMenu.PopupSwitchMenuItem(label, this._config[name]);
-    configSwitch.connect('toggled', (item, state) => {
-      this._config[name] = state;
+    configSwitch.connect('toggled', (item) => {
+      this._config[name] = Boolean(item.state);
       this._saveSettings();
       this._updateLabel();
       // Cheap/simple to call unconditionally for every config switch (not
@@ -392,7 +424,20 @@ export default class TimezonesExtension extends Extension {
       // clock vanish/reappear the moment they flip it, no restart needed.
       this._applySystemClockVisibility();
     });
+    this._configSwitches[name] = configSwitch;
     this._configMenu.addMenuItem(configSwitch);
+  }
+
+  // Belt-and-suspenders companion to the fix above: forces every config
+  // switch's VISUAL state back to match this._config (the authoritative,
+  // persisted value) every time the menu opens (see _updateMenu()). This
+  // means even if a switch's displayed toggle position and this._config
+  // ever did desync for any reason, reopening the menu self-heals the
+  // visual -- the stored value always wins.
+  _syncConfigSwitches() {
+    Object.keys(this._configSwitches).forEach((name) => {
+      this._configSwitches[name].setToggleState(Boolean(this._config[name]));
+    });
   }
 
   // Hides/shows GNOME Shell's own top-bar clock label to match
@@ -474,6 +519,7 @@ export default class TimezonesExtension extends Extension {
     this._updateTimeLabels();
     this._updateActiveMenu();
     this._updateInactiveMenu();
+    this._syncConfigSwitches();
   }
 
   _updateTimeLabels() {
@@ -545,17 +591,67 @@ export default class TimezonesExtension extends Extension {
     menuItem.add_child(dragHandle);
 
     // Tag the handle actor directly with the zone id it represents, and
-    // pre-set its own _delegate to itself. ASSUMPTION (flag for runtime
-    // verification): dnd.js's _Draggable only sets `actor._delegate = this`
-    // if `actor._delegate` is not already set, so pre-setting it here means
-    // acceptDrop's `source` argument (whatever exact object dnd.js passes --
-    // the convention is not 100% certain from static reading alone) should
+    // pre-set its own _delegate to itself so it can serve as the drag
+    // SOURCE's identity (read back via _getDragSourceZone()). This is safe
+    // to overwrite because dragHandle is a plain St.Button we just created
+    // -- it has no prior shell-managed _delegate, unlike menuItem/box
+    // below. ASSUMPTION (flag for runtime verification): dnd.js's
+    // _Draggable only sets `actor._delegate = this` if `actor._delegate`
+    // is not already set, so pre-setting it here means acceptDrop's
+    // `source` argument (whatever exact object dnd.js passes -- the
+    // convention is not 100% certain from static reading alone) should
     // resolve to `dragHandle` either directly or via a `_delegate` hop;
-    // _getDragSourceZone() below checks both shapes defensively so the
-    // reorder still works even if the exact resolution differs from this
-    // assumption.
+    // _getDragSourceZone() below checks both shapes defensively.
+    //
+    // BUG FIX (live-testing report): dragHandle's self-delegate does NOT
+    // implement handleDragOver/acceptDrop (it's a plain St.Button, not a
+    // drop target). REASONING (documented per fix request, not verified
+    // against a live shell): dnd.js's target search walks UP from the
+    // actor under the pointer through ancestors, testing
+    // `actor._delegate && actor._delegate.handleDragOver` at each level
+    // and continuing to `actor.get_parent()` when that fails -- it does
+    // not stop/dead-zone just because the immediate hit's delegate lacks
+    // the method. So a drop landing directly on another row's dragHandle
+    // should still resolve up to that row's `menuItem` (see below), whose
+    // own delegate now has handleDragOver/acceptDrop. Flagged for runtime
+    // verification: if dropping precisely on a handle turns out to be a
+    // dead zone in practice, the walk-continues-upward assumption above is
+    // what needs revisiting.
     dragHandle.dragZoneId = item.timezone;
     dragHandle._delegate = dragHandle;
+
+    // BUG FIX (live-testing report): the handle rendered at the RIGHT end
+    // of the row after a drag instead of staying at the left. ROOT CAUSE:
+    // with no getDragActor() override, dnd.js's default behavior is to
+    // drag the REAL `dragHandle` actor itself -- it reparents it to the
+    // stage for the duration of the drag. `restoreOnSuccess: false` then
+    // means it is never reparented back to its original spot in `menuItem`
+    // on a successful drop; instead it's left wherever dnd.js's drop
+    // handling puts it (effectively orphaned from its row), while
+    // `_reorderActiveZone()`'s `_updateActiveMenu()` rebuild subsequently
+    // adds a brand-new row (with its own brand-new handle) -- the stray
+    // ex-handle actor ending up appended after everything else is what
+    // rendered as "handle at the right end."
+    //
+    // FIX: give the draggable its own getDragActor()/getDragActorSource(),
+    // both standard dnd.js Draggable hooks read from the drag source's
+    // delegate (`dragHandle._delegate`, which is `dragHandle` itself).
+    // getDragActor() returns a freestanding CLONE St.Icon (same icon_name/
+    // style_class, so it looks identical) instead of the live handle, so
+    // the real `dragHandle` actor is never reparented/touched by the drag
+    // at all -- it stays exactly where it was created, at the left end of
+    // the row, before, during, and after any drag. getDragActorSource()
+    // returns the real handle so dnd.js can still compute the clone's
+    // starting position/size from it. With the real actor never moving,
+    // `restoreOnSuccess` becomes moot (there is nothing to restore); it is
+    // left as `false` since it no longer has any effect either way.
+    dragHandle.getDragActor = () => {
+      return new St.Icon({
+        icon_name: 'list-drag-handle-symbolic',
+        style_class: 'popup-menu-icon'
+      });
+    };
+    dragHandle.getDragActorSource = () => dragHandle;
 
     let draggable = DND.makeDraggable(dragHandle, { restoreOnSuccess: false, manualMode: false });
     // Handlers exist per the drag-begin/drag-end requirement; currently
@@ -569,26 +665,43 @@ export default class TimezonesExtension extends Extension {
     // the active section's box (see _initMenu) is the separate end-of-list
     // target. Insertion index: above this row's vertical midpoint inserts
     // before it (at rowIndex), below inserts after it (at rowIndex + 1).
-    // ASSUMPTION (flag for runtime verification): handleDragOver/acceptDrop
-    // living on `menuItem._delegate` is the standard dnd.js drop-target
-    // convention (target actor found by walking up from the pointer
-    // position; its `_delegate.handleDragOver`/`.acceptDrop` are called).
-    menuItem._delegate = {
-      handleDragOver: () => DND.DragMotionResult.MOVE_DROP,
-      acceptDrop: (source, actor, x, y) => {
-        let zoneId = this._getDragSourceZone(source);
-        if (!zoneId) {
-          return false;
-        }
-
-        let [, rowY] = menuItem.get_transformed_position();
-        let rowHeight = menuItem.get_height();
-        let droppedBelowMidpoint = rowHeight > 0 && y - rowY > rowHeight / 2;
-        let targetIndex = rowIndex + (droppedBelowMidpoint ? 1 : 0);
-
-        this._reorderActiveZone(zoneId, targetIndex);
-        return true;
+    //
+    // BUG FIX (live-testing report): this USED to replace `menuItem._delegate`
+    // wholesale with a plain { handleDragOver, acceptDrop } object. That was
+    // wrong and caused the reported "drag one row -> every active row
+    // triples" bug: PopupBaseMenuItem's own constructor sets
+    // `this._delegate = this` (self-delegate), and PopupMenuBase.removeAll()
+    // discovers which of its box's children are menu items to destroy by
+    // reading each child's `_delegate` and checking `instanceof
+    // PopupBaseMenuItem`. Overwriting `_delegate` with a plain object made
+    // every row invisible to that check, so `_updateActiveMenu()`'s
+    // `removeAll()` silently destroyed nothing -- old rows were orphaned
+    // (still in the box, still rendering) while a fresh batch was appended
+    // on top every time the menu opened or a drop occurred, producing
+    // duplicated/tripled rows.
+    //
+    // FIX: attach handleDragOver/acceptDrop as own properties DIRECTLY on
+    // `menuItem` instead, leaving `menuItem._delegate` (== menuItem itself)
+    // completely untouched. dnd.js's `target._delegate.handleDragOver` still
+    // resolves correctly (`target._delegate` is `menuItem`, which now has
+    // the method directly), and `removeAll()`'s `instanceof PopupBaseMenuItem`
+    // check keeps working since the delegate is still the real menu item.
+    // DO NOT reassign `menuItem._delegate` here or anywhere else in this
+    // file -- always add methods to the existing delegate instead.
+    menuItem.handleDragOver = () => DND.DragMotionResult.MOVE_DROP;
+    menuItem.acceptDrop = (source, actor, x, y) => {
+      let zoneId = this._getDragSourceZone(source);
+      if (!zoneId) {
+        return false;
       }
+
+      let [, rowY] = menuItem.get_transformed_position();
+      let rowHeight = menuItem.get_height();
+      let droppedBelowMidpoint = rowHeight > 0 && y - rowY > rowHeight / 2;
+      let targetIndex = rowIndex + (droppedBelowMidpoint ? 1 : 0);
+
+      this._reorderActiveZone(zoneId, targetIndex);
+      return true;
     };
 
     let label = new St.Label({
