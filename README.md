@@ -1,6 +1,14 @@
 # Gnome Timezones Extension
 Show multiple clocks in the panel. 
 
+> **Maintained fork.** This is an actively maintained fork of the original
+> [Timezones extension](https://github.com/Masquerade-Circus/gnome-timezones-extension)
+> by [Masquerade Circus](http://masquerade-circus.net), which has been unmaintained
+> since April 2022 (last supporting GNOME Shell 42). This fork ports it to the
+> GNOME Shell 45+ ESM format (tested on 45–47) and adds city-name search, custom
+> clock labels, and drag-to-reorder. Not affiliated with the original author; the
+> original Apache-2.0 license and authorship are preserved.
+
 For those who need more than one additional clock, this extension makes very easy to add two, three or more clocks to the main panel area.
 
 There is already an excellent [MultiClock](https://github.com/mibus/MultiClock) extension, but that extension only displays a second clock. What i need is to reference 3 different clocks, my local time, UTC time and Puerto Rico time. If you have the same need, this extension can help you.
@@ -61,4 +69,4 @@ On X11 you can reload the shell with Alt+F2, `r`, Enter after making changes; on
 
 ## Legal
 
-Author: [Masquerade Circus](http://masquerade-circus.net). License [Apache-2.0](https://opensource.org/licenses/Apache-2.0)
+Original author: [Masquerade Circus](http://masquerade-circus.net). Fork maintained by [ipswitch8](https://github.com/ipswitch8). License [Apache-2.0](https://opensource.org/licenses/Apache-2.0) — original copyright and LICENSE preserved.
