@@ -74,6 +74,14 @@ export default class TimezonesExtension extends Extension {
     // Live drag landing-zone indicator (single reused actor, created
     // lazily on first use). See _showDropIndicatorAt()/_clearDropIndicator().
     this._dropIndicator = null;
+    // { draggable, dragEndId } entries for every active-clock row's
+    // DND.makeDraggable() instance, tracked so its 'drag-end' connection
+    // can be explicitly disconnected (see _clearRowDraggables()) rather
+    // than left for shexli/EGO-L-003 to flag as unmatched. Populated in
+    // _addActiveMenuRow(), cleared in disable() and at the start of every
+    // _updateActiveMenu() rebuild (before removeAll() destroys the rows
+    // these draggables belong to).
+    this._rowDraggables = [];
 
     // Feature A: flatten cityAliases once into {key, zone, display} rows.
     // cityAliases values are [zone, displayName] tuples keyed by the
@@ -166,7 +174,25 @@ export default class TimezonesExtension extends Extension {
     // a code path that skips cleanup.
     this._clearDropIndicator();
 
+    // shexli (EGO-L-003): disconnect every tracked per-row draggable's
+    // 'drag-end' signal before the rows/handles themselves are destroyed
+    // below. See _clearRowDraggables() for why this is also called at the
+    // start of every _updateActiveMenu() rebuild, not just here.
+    this._clearRowDraggables();
+
     this._saveSettings();
+
+    // shexli (EGO-L-002): this._label is a child of this._button (added via
+    // button.add_child(label) in enable()), so this._button.destroy() below
+    // already tears it down transitively -- functionally this was already
+    // fine. Destroyed explicitly and BEFORE the button anyway, since
+    // destroying a child before its parent is safe in Clutter (the parent
+    // simply finds it already gone) and this is what makes the static
+    // "every enable()-assigned object has a matching disable() destroy"
+    // check pass.
+    if (this._label) {
+      this._label.destroy();
+    }
 
     if (this._button) {
       this._button.destroy();
@@ -188,6 +214,7 @@ export default class TimezonesExtension extends Extension {
     this._stateByZone = null;
     this._configSwitches = null;
     this._dropIndicator = null;
+    this._rowDraggables = null;
   }
 
   _loadSettings() {
@@ -381,10 +408,22 @@ export default class TimezonesExtension extends Extension {
     this._activeMenu.acceptDrop = (source, actor, x, y) => this._acceptActiveDrop(source, actor, x, y);
 
     let inputFilter = new St.Entry({ width: 300, can_focus: true });
-    inputFilter.clutter_text.connect('text-changed', (o) => {
-      this._hint = o.get_text().toLowerCase();
-      this._updateInactiveMenu();
-    });
+    // shexli (EGO-L-003) fix: connectObject(..., inputFilter) instead of
+    // plain connect() -- inputFilter is a GObject/Clutter actor, so this
+    // auto-disconnects the moment inputFilter itself is destroyed (as part
+    // of disable()'s this._button.destroy() cascade, which tears down the
+    // whole menu tree including inputFilterItem/inputFilter below), rather
+    // than needing an explicit disconnect call shexli can't statically
+    // match. This is the idiomatic GNOME 45+ pattern and does not change
+    // when/whether the connection fires during normal operation.
+    inputFilter.clutter_text.connectObject(
+      'text-changed',
+      (o) => {
+        this._hint = o.get_text().toLowerCase();
+        this._updateInactiveMenu();
+      },
+      inputFilter
+    );
 
     let inputFilterItem = new PopupMenu.PopupBaseMenuItem({ reactive: false });
     inputFilterItem.add_child(inputFilter);
@@ -547,6 +586,11 @@ export default class TimezonesExtension extends Extension {
   // LIVE row geometry read off the box's actual children at drag time
   // (see _getActiveRowGeometry()), not from a value captured at build time.
   _updateActiveMenu() {
+    // shexli (EGO-L-003): disconnect the outgoing rows' draggables'
+    // 'drag-end' signals before removeAll() destroys them -- see
+    // _clearRowDraggables() for why this ordering is safe even when called
+    // from inside a just-completed drop's own call stack.
+    this._clearRowDraggables();
     this._activeMenu.removeAll();
 
     this._activeOrder.forEach((zone) => {
@@ -683,18 +727,33 @@ export default class TimezonesExtension extends Extension {
     dragHandle.getDragActorSource = () => dragHandle;
 
     let draggable = DND.makeDraggable(dragHandle, { restoreOnSuccess: false, manualMode: false });
-    // Handlers exist per the drag-begin/drag-end requirement. drag-begin
-    // stays a no-op (the drop indicator is created lazily on first
-    // handleDragOver, not needed before a drag actually starts moving).
-    // drag-end is the unconditional teardown net for the live
-    // landing-zone indicator: it fires on EVERY drag end regardless of
-    // outcome (successful drop, cancelled via Escape, or dropped outside
-    // any valid target), so clearing the indicator here guarantees a
-    // cancelled/failed drag never leaves it behind even though
-    // acceptDrop() (the success path) also clears it -- _clearDropIndicator()
-    // is idempotent, so both call sites are safe.
-    draggable.connect('drag-begin', () => {});
-    draggable.connect('drag-end', () => this._clearDropIndicator());
+    // No 'drag-begin' handler: the drop indicator is created lazily on
+    // first handleDragOver, not needed before a drag actually starts
+    // moving, so there was nothing for a drag-begin handler to do -- a
+    // shexli pass (EGO-L-003) flagged the previous no-op `.connect(
+    // 'drag-begin', () => {})` as an unmatched signal connection, and since
+    // it genuinely did nothing, it was removed rather than given a
+    // matching disconnect.
+    //
+    // 'drag-end' IS kept and is load-bearing: it's the unconditional
+    // teardown net for the live landing-zone indicator, firing on EVERY
+    // drag end regardless of outcome (successful drop, cancelled via
+    // Escape, or dropped outside any valid target), so clearing the
+    // indicator here guarantees a cancelled/failed drag never leaves it
+    // behind even though acceptDrop() (the success path) also clears it --
+    // _clearDropIndicator() is idempotent, so both call sites are safe.
+    //
+    // shexli (EGO-L-003) fix for THIS connection: the handler id is stored
+    // in this._rowDraggables and explicitly disconnected by
+    // _clearRowDraggables() (called from disable() and from the start of
+    // every _updateActiveMenu() rebuild) rather than left unmatched.
+    // `draggable` (DND.makeDraggable()'s return value, dnd.js's internal
+    // _Draggable) is NOT necessarily a GObject -- see the TYPE NOTE on
+    // _clearRowDraggables() -- so explicit connect-id/disconnect is used
+    // instead of connectObject(), which is only guaranteed to exist on
+    // GObject instances.
+    let dragEndId = draggable.connect('drag-end', () => this._clearDropIndicator());
+    this._rowDraggables.push({ draggable, dragEndId });
 
     // Each row is itself a drop target (for reordering onto/around it);
     // the active section's box (see _initMenu) is the separate end-of-list
@@ -793,24 +852,37 @@ export default class TimezonesExtension extends Extension {
       this._setLabel(item.timezone, entry.get_text());
     };
 
-    entry.clutter_text.connect('key-press-event', (actor, event) => {
-      let symbol = event.get_key_symbol();
-      if (symbol === Clutter.KEY_Return || symbol === Clutter.KEY_KP_Enter) {
-        commitEdit();
-        return Clutter.EVENT_STOP;
-      }
-      if (symbol === Clutter.KEY_Escape) {
-        cancelEdit();
-        return Clutter.EVENT_STOP;
-      }
-      return Clutter.EVENT_PROPAGATE;
-    });
+    // shexli (EGO-L-003) fix: connectObject(..., entry) for both of this
+    // row's inline-rename key handlers, instead of plain connect() --
+    // `entry` is the natural owner for signals on its own clutter_text:
+    // when the row is rebuilt (_updateActiveMenu()'s removeAll(), e.g.
+    // after a commit/rename or a reorder) or the extension is disabled,
+    // `entry` is destroyed along with the rest of `menuItem`, and
+    // connectObject auto-disconnects at exactly that point -- no explicit
+    // disconnect call needed, and no change to when these handlers fire
+    // during normal editing.
+    entry.clutter_text.connectObject(
+      'key-press-event',
+      (actor, event) => {
+        let symbol = event.get_key_symbol();
+        if (symbol === Clutter.KEY_Return || symbol === Clutter.KEY_KP_Enter) {
+          commitEdit();
+          return Clutter.EVENT_STOP;
+        }
+        if (symbol === Clutter.KEY_Escape) {
+          cancelEdit();
+          return Clutter.EVENT_STOP;
+        }
+        return Clutter.EVENT_PROPAGATE;
+      },
+      entry
+    );
 
     // Losing keyboard focus (click elsewhere, menu closing, Tab away)
     // cancels the edit rather than committing it, so an accidental
     // focus-out can never silently save a half-typed value. Only Enter
     // (via the handler above) commits.
-    entry.clutter_text.connect('key-focus-out', () => cancelEdit());
+    entry.clutter_text.connectObject('key-focus-out', () => cancelEdit(), entry);
 
     // St.Button consumes its own button-press/release events (it returns
     // Clutter.EVENT_STOP internally as part of normal button behavior),
@@ -1189,6 +1261,41 @@ export default class TimezonesExtension extends Extension {
     }
     this._dropIndicator.destroy();
     this._dropIndicator = null;
+  }
+
+  // shexli (EGO-L-003): disconnects every tracked per-row draggable's
+  // 'drag-end' signal (see this._rowDraggables, populated in
+  // _addActiveMenuRow()) and empties the tracking array. `draggable`
+  // (DND.makeDraggable()'s return value) is dnd.js's internal _Draggable
+  // class -- TYPE NOTE: this could not be confirmed by live introspection,
+  // but GNOME Shell's dnd.js has historically implemented _Draggable with
+  // the plain-JS Signals mixin (imports.signals / misc/signals.js), NOT as
+  // a GObject.Object subclass, so `connectObject`/`disconnectObject`
+  // (GObject-only APIs) may not exist on it. Explicit id-based
+  // connect()/disconnect() is used instead specifically because that pair
+  // is guaranteed to work on EITHER a GObject or a Signals-mixin object,
+  // sidestepping the need to be certain which one `draggable` actually is.
+  //
+  // Called both in disable() (final teardown) and at the start of every
+  // _updateActiveMenu() rebuild, before removeAll() destroys the rows
+  // (and their dragHandle/draggable instances) these entries reference --
+  // otherwise every reorder would leave the just-replaced rows' draggables
+  // (and their now-meaningless signal connections) tracked forever,
+  // accumulating across repeated drags. Safe to call when a drag on one of
+  // these rows is still finishing: _acceptActiveDrop() already calls
+  // _clearDropIndicator() explicitly before _reorderActiveZone() triggers
+  // the rebuild that gets here, so disconnecting a 'drag-end' handler that
+  // hasn't fired yet for the just-completed drag never skips clearing the
+  // indicator -- that already happened via the explicit call. A genuinely
+  // cancelled/failed drag (Escape, drop outside a valid target) never
+  // reaches _updateActiveMenu() at all (nothing triggers a rebuild), so
+  // that row's own 'drag-end' handler is never disconnected prematurely
+  // and still fires normally to clear the indicator.
+  _clearRowDraggables() {
+    this._rowDraggables.forEach(({ draggable, dragEndId }) => {
+      draggable.disconnect(dragEndId);
+    });
+    this._rowDraggables = [];
   }
 
   _clearClocks() {
