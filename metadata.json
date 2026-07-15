@@ -4,7 +4,7 @@
   "name": "Timezones extension (continued)",
   "shell-version": ["45", "46", "47"],
   "url": "https://github.com/ipswitch8/gnome-timezones-extension",
-  "uuid": "timezones@itwerx.net",
+  "uuid": "inquiries@itwerx.net",
   "settings-schema": "org.gnome.shell.extensions.timezones",
   "version": 8
 }
