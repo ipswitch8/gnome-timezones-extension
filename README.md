@@ -41,12 +41,57 @@ There is already an excellent [MultiClock](https://github.com/mibus/MultiClock) 
 -   Update the readme with an example if you add or change any functionality.
 
 ### Installation
+
+This fork installs and runs on its own — you do **not** need to wait for the
+upstream [port pull request](https://github.com/Masquerade-Circus/gnome-timezones-extension/pulls)
+to be accepted (the original project has been unmaintained since 2022, so it may
+never be). Use either route below.
+
+**From extensions.gnome.org** (once the store review clears): search for
+*Timezones extension (continued)* and toggle it on. This route handles updates
+for you and is the easiest for most users.
+
+**From source — the maintained port branch.** Clone the fork's
+[`gnome-47-port`](https://github.com/ipswitch8/gnome-timezones-extension/tree/gnome-47-port)
+branch directly into your extensions directory, compile the settings schema, and
+enable it:
+
 ```bash
-$ cd ~/.local/share/gnome-shell/extensions/
-$ git clone git@github.com:Masquerade-Circus/gnome-timezones-extension.git timezones@masquerade-circus.net
+$ git clone --branch gnome-47-port \
+    https://github.com/ipswitch8/gnome-timezones-extension.git \
+    ~/.local/share/gnome-shell/extensions/timezones@masquerade-circus.net
+$ cd ~/.local/share/gnome-shell/extensions/timezones@masquerade-circus.net
+$ glib-compile-schemas schemas/
+$ gnome-extensions enable timezones@masquerade-circus.net
 ```
 
+Then reload GNOME Shell so it picks up the new extension: on X11 press Alt+F2,
+type `r`, Enter; on Wayland log out and back in.
+
+> **On the directory name / uuid:** GNOME loads an extension from a directory
+> whose name matches its `uuid`. This branch keeps the original uuid
+> `timezones@masquerade-circus.net` (so it can also serve as the upstream PR),
+> so clone it into a directory of that exact name as shown above. The
+> extensions.gnome.org listing is published under a separate uuid
+> (`inquiries@itwerx.net`), which the store requires for a separately-listed
+> fork — pick one route or the other, not both at once.
+
+> Prefer the original, unmodified extension instead? It lives at
+> [Masquerade-Circus/gnome-timezones-extension](https://github.com/Masquerade-Circus/gnome-timezones-extension)
+> (GNOME Shell 42, without city search, custom labels, or drag-to-reorder).
+
 ### Development
+
+Work against **this fork**, branch
+[`gnome-47-port`](https://github.com/ipswitch8/gnome-timezones-extension/tree/gnome-47-port) —
+that is where the GNOME Shell 45+ ESM port and every new feature (city-name
+search, custom labels, drag-to-reorder) live. The
+[original repository](https://github.com/Masquerade-Circus/gnome-timezones-extension)
+is the historical upstream and has been unmaintained since 2022; a port PR is
+open there but may never be merged, so treat the fork as the canonical source
+and send pull requests to it. Clone `gnome-47-port` straight into your extensions
+directory (see [Installation](#installation)) so your edits run live in the
+shell.
 
 The extension has no dependencies and no `package.json`/bundler — `extension.js`, `timezones.js`, and `cityAliases.js` are loaded by GNOME Shell as-is. Active-clock reordering uses GNOME Shell's built-in `resource:///org/gnome/shell/ui/dnd.js` module (`DND.makeDraggable` on a per-row drag handle); this is a stable Shell-internal module, not a new dependency.
 
