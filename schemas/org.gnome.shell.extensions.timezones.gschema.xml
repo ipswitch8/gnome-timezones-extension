@@ -12,5 +12,20 @@
       <summary>Per-zone custom display labels</summary>
       <description>Maps an IANA timezone id to a user-chosen display label (e.g. "Home") shown instead of the city name in the panel and menu.</description>
     </key>
+    <key name="separator" type="s">
+      <default>""</default>
+      <summary>Custom separator between timezone entries</summary>
+      <description>The string inserted between timezone entries in the panel and menu. An empty string means "use legacy behavior": the existing boolean "showSeparator" key in "config" decides between a " | " separator and four spaces. Set to a non-empty value (typically one of the "value" strings from separators.js) to override that legacy behavior explicitly.</description>
+    </key>
+    <key name="formatting" type="a{ss}">
+      <default>{}</default>
+      <summary>Per-zone custom text formatting</summary>
+      <description>Maps an IANA timezone id to a JSON-encoded per-entry formatting object of the shape {"size": &lt;int pt or 0=inherit&gt;, "color": "#rrggbb" or "", "boldCity": bool, "boldTime": bool, "boldZone": bool}. Missing or empty entries fall back to "formatting-defaults", and ultimately to the current appearance.</description>
+    </key>
+    <key name="formatting-defaults" type="s">
+      <default>""</default>
+      <summary>Global default text formatting</summary>
+      <description>A single JSON-encoded object of the same shape as the values in "formatting" ({"size": &lt;int pt or 0=inherit&gt;, "color": "#rrggbb" or "", "boldCity": bool, "boldTime": bool, "boldZone": bool}), used as the fallback for any zone without a per-entry override in "formatting". An empty string means no defaults are set and the current appearance is preserved.</description>
+    </key>
   </schema>
 </schemalist>
