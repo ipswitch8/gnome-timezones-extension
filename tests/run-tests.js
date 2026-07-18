@@ -28,6 +28,12 @@ import {
   resolveSeparatorValue,
 } from '../separators.js';
 
+import {
+  FONT_SIZE_PRESETS,
+  COLOR_PALETTE,
+  resolvePresetId,
+} from '../formattingPresets.js';
+
 let passCount = 0;
 let failCount = 0;
 const failures = [];
@@ -496,6 +502,98 @@ test('resolveSeparatorValue: malicious literal separator is safely neutralized o
   const resolved = resolveSeparatorValue(malicious);
   const escaped = escapeMarkup(resolved);
   assertFalse(/[<>]/.test(escaped), `unescaped angle bracket in ${escaped}`);
+});
+
+// ---------------------------------------------------------------------
+// formattingPresets: font-size preset ladder
+// ---------------------------------------------------------------------
+
+test('formattingPresets: no duplicate font-size preset ids', () => {
+  const ids = FONT_SIZE_PRESETS.map((p) => p.id);
+  assertEqual(new Set(ids).size, ids.length, 'duplicate font-size preset id found');
+});
+
+for (const preset of FONT_SIZE_PRESETS) {
+  test(`formattingPresets: font-size preset "${preset.id}" (${preset.value}) survives sanitizeFontSize unchanged`, () => {
+    assertEqual(sanitizeFontSize(preset.value), preset.value);
+  });
+}
+
+// ---------------------------------------------------------------------
+// formattingPresets: color palette
+// ---------------------------------------------------------------------
+
+test('formattingPresets: no duplicate color palette ids', () => {
+  const ids = COLOR_PALETTE.map((p) => p.id);
+  assertEqual(new Set(ids).size, ids.length, 'duplicate color palette id found');
+});
+
+for (const preset of COLOR_PALETTE) {
+  test(`formattingPresets: color palette "${preset.id}" (${JSON.stringify(preset.value)}) survives sanitizeColor unchanged`, () => {
+    assertEqual(sanitizeColor(preset.value), preset.value);
+  });
+}
+
+// ---------------------------------------------------------------------
+// formattingPresets: resolvePresetId
+// ---------------------------------------------------------------------
+
+test('resolvePresetId: matches a known font-size preset value', () => {
+  assertEqual(resolvePresetId(FONT_SIZE_PRESETS, 14), '14');
+});
+
+test('resolvePresetId: matches the "Default" font-size preset (0)', () => {
+  assertEqual(resolvePresetId(FONT_SIZE_PRESETS, 0), 'default');
+});
+
+test('resolvePresetId: unmatched font size (hand-edited dconf value, e.g. 13) degrades to null', () => {
+  assertEqual(resolvePresetId(FONT_SIZE_PRESETS, 13), null);
+});
+
+test('resolvePresetId: matches a known color palette value', () => {
+  assertEqual(resolvePresetId(COLOR_PALETTE, '#3584e4'), 'blue');
+});
+
+test('resolvePresetId: matches the "Default" color preset (empty string)', () => {
+  assertEqual(resolvePresetId(COLOR_PALETTE, ''), 'default');
+});
+
+test('resolvePresetId: unmatched color (hand-edited dconf value, e.g. #123456) degrades to null', () => {
+  assertEqual(resolvePresetId(COLOR_PALETTE, '#123456'), null);
+});
+
+test('resolvePresetId: empty preset list never throws, degrades to null', () => {
+  assertEqual(resolvePresetId([], 'anything'), null);
+});
+
+test('resolvePresetId: supports a custom match field (e.g. separator "id")', () => {
+  assertEqual(resolvePresetId(SEPARATORS, 'pipe', 'id'), 'pipe');
+  assertEqual(resolvePresetId(SEPARATORS, 'does-not-exist', 'id'), null);
+});
+
+// ---------------------------------------------------------------------
+// global formatting-defaults round trip (Phase 3 menu controls)
+// ---------------------------------------------------------------------
+
+test('serializeFormatting/parseFormatting: round-trips a representative global-defaults object', () => {
+  const defaults = { size: 14, color: '#3584e4', boldCity: true, boldTime: false, boldZone: true };
+  const serialized = serializeFormatting(defaults);
+  const roundTripped = parseFormatting(serialized);
+  assertEqual(roundTripped, defaults);
+});
+
+test('serializeFormatting/parseFormatting: round-trips every font-size preset as a global default', () => {
+  for (const preset of FONT_SIZE_PRESETS) {
+    const defaults = { ...DEFAULT_FORMATTING, size: preset.value };
+    assertEqual(parseFormatting(serializeFormatting(defaults)), defaults);
+  }
+});
+
+test('serializeFormatting/parseFormatting: round-trips every color preset as a global default', () => {
+  for (const preset of COLOR_PALETTE) {
+    const defaults = { ...DEFAULT_FORMATTING, color: preset.value };
+    assertEqual(parseFormatting(serializeFormatting(defaults)), defaults);
+  }
 });
 
 // ---------------------------------------------------------------------

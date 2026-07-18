@@ -17,11 +17,14 @@ import cityAliases from './cityAliases.js';
 import {
   escapeMarkup,
   parseFormatting,
+  sanitizeFormatting,
+  serializeFormatting,
   DEFAULT_FORMATTING,
   buildEntryText,
   buildEntryMarkup,
 } from './formatting.js';
-import { resolveSeparatorValue } from './separators.js';
+import { SEPARATORS, resolveSeparatorValue } from './separators.js';
+import { FONT_SIZE_PRESETS, COLOR_PALETTE, resolvePresetId } from './formattingPresets.js';
 
 // Whitelist of the only config keys this extension ever reads/writes.
 // Anything else present in the 'config' GSettings value (e.g. from a
@@ -88,6 +91,18 @@ export default class TimezonesExtension extends Extension {
     // match this._config on every menu open, so the toggle visual and the
     // stored value can never permanently desync (see _syncConfigSwitches).
     this._configSwitches = {};
+    // Phase 3 popup-menu picker state: id -> PopupMenuItem row, populated
+    // by _buildSeparatorSubmenu()/_buildFontSizeSubmenu()/
+    // _buildColorSubmenu(). Used by _syncSeparatorSubmenu()/
+    // _syncFontSizeSubmenu()/_syncColorSubmenu() the same way
+    // this._configSwitches is used by _syncConfigSwitches(): forces every
+    // row's ornament back to match the authoritative stored value on
+    // every menu open and on every external gsettings change, so the
+    // visual selection can never permanently desync (see _updateMenu()
+    // and the 'changed' handler below).
+    this._separatorMenuItems = {};
+    this._fontSizeMenuItems = {};
+    this._colorMenuItems = {};
     // Live drag landing-zone indicator (single reused actor, created
     // lazily on first use). See _showDropIndicatorAt()/_clearDropIndicator().
     this._dropIndicator = null;
@@ -154,6 +169,64 @@ export default class TimezonesExtension extends Extension {
     this._initMenu();
     this._updateLabel();
 
+    // Phase 3: react to settings changed EXTERNALLY (e.g. dconf-editor,
+    // or another instance of this same extension code) so the panel AND
+    // every new/existing menu control (separator + font-size + color
+    // submenu ornaments, AND the boolean switches -- the 5 original
+    // config switches plus the 3 Phase 3 bold switches) stay correct
+    // without requiring a menu reopen or extension reload. Calls both
+    // _syncConfigSwitches() (switches) and _syncMenuControls() (submenu
+    // ornaments) -- mirroring exactly what _updateMenu() already does on
+    // every menu open, see below -- so this is the FIRST code path that
+    // can resync a stale switch/ornament without the user opening the
+    // menu at all.
+    //
+    // REENTRANCY: this is also the first code path where
+    // _syncConfigSwitches() can run OUTSIDE of a user-driven menu-open.
+    // PopupSwitchMenuItem.setToggleState() (called by _syncConfigSwitches())
+    // sets the underlying Switch's `state` property directly; verified by
+    // reading this GNOME Shell's own popupMenu.js (Switch.set state()):
+    // it only calls `this.notify('state')` -- which Switch's
+    // 'notify::state' handler turns into an emitted 'toggled' signal --
+    // when the new value actually DIFFERS from the current one. So
+    // setToggleState() is a no-op-emission when the switch is already
+    // showing the correct value (the common case), but DOES synchronously
+    // emit 'toggled' on exactly the desync case this sync exists to fix --
+    // and our _addConfigSwitch() 'toggled' handler writes to gsettings.
+    // Without a guard, resyncing a stale switch from an external change
+    // would itself trigger a synchronous extra write-back to gsettings
+    // (same value, so not an infinite loop -- this._config[name]/
+    // this._formattingDefaults would already match on the next pass, so
+    // no further notify would fire -- but a redundant write with no
+    // purpose). this._applyingExternalSettings guards exactly that
+    // synchronous window: the 'toggled' handler below checks it and skips
+    // writing while a 'changed'-triggered resync is in progress. Not
+    // needed on the pre-existing _updateMenu() (menu-open) call to
+    // _syncConfigSwitches() -- this guard only wraps the NEW reentrant
+    // path introduced by this 'changed' listener.
+    //
+    // Connected here (after _initMenu() has built every submenu/switch)
+    // so this._separatorMenuItems/this._fontSizeMenuItems/
+    // this._colorMenuItems/this._configSwitches are already populated by
+    // the time this could ever fire (a signal connected via .connect()
+    // cannot receive emissions that happened before the connection was
+    // made, so there is no window where this fires before _initMenu()
+    // has run). Disconnected in disable() BEFORE this._settings is
+    // nulled, so it can never run against torn-down state -- see the
+    // matching teardown block there.
+    this._applyingExternalSettings = false;
+    this._settingsChangedId = this._settings.connect('changed', () => {
+      this._applyingExternalSettings = true;
+      try {
+        this._loadSettings();
+        this._updateLabel();
+        this._syncConfigSwitches();
+        this._syncMenuControls();
+      } finally {
+        this._applyingExternalSettings = false;
+      }
+    });
+
     this._systemClock = new GnomeDesktop.WallClock();
     this._signalId = this._systemClock.connect('notify::clock', () => this._updateLabel());
 
@@ -179,6 +252,15 @@ export default class TimezonesExtension extends Extension {
     }
     this._signalId = null;
     this._systemClock = null;
+
+    // Phase 3: disconnect the settings 'changed' handler connected in
+    // enable() BEFORE this._settings is nulled out below (_saveSettings()
+    // near the end of this method still needs it).
+    if (this._settings && this._settingsChangedId) {
+      this._settings.disconnect(this._settingsChangedId);
+    }
+    this._settingsChangedId = null;
+    this._applyingExternalSettings = null;
 
     if (this._menu && this._menuOpenStateId) {
       this._menu.disconnect(this._menuOpenStateId);
@@ -235,6 +317,9 @@ export default class TimezonesExtension extends Extension {
     this._separatorId = null;
     this._formatting = null;
     this._formattingDefaults = null;
+    this._separatorMenuItems = null;
+    this._fontSizeMenuItems = null;
+    this._colorMenuItems = null;
   }
 
   _loadSettings() {
@@ -399,6 +484,44 @@ export default class TimezonesExtension extends Extension {
     this._settings.set_value('labels', new GLib.Variant('a{ss}', this._labels));
   }
 
+  // Phase 3: persists this._separatorId (a curated SEPARATORS id, chosen
+  // via the popup menu's "Separator" submenu) to the 'separator' gsetting.
+  // Deliberately separate from _saveSettings() above (which only ever
+  // touches 'timezones'/'config'/'labels' -- see its own comment) rather
+  // than folded into it, so this new key's write path is independently
+  // auditable and _saveSettings()'s existing guard/scope is untouched.
+  _saveSeparatorSetting() {
+    if (!this._settings) {
+      return;
+    }
+    this._settings.set_value('separator', new GLib.Variant('s', this._separatorId || ''));
+  }
+
+  // Phase 3: persists this._formattingDefaults (mutated by the popup
+  // menu's "Formatting" submenu: font size, color, and the three
+  // per-segment bold switches) to the 'formatting-defaults' gsetting via
+  // serializeFormatting(), which re-sanitizes defensively regardless of
+  // whether the in-memory object is already sanitized -- values chosen in
+  // this menu UI always flow through the same sanitizers as any other
+  // formatting source before reaching gsettings/markup.
+  _saveFormattingDefaults() {
+    if (!this._settings) {
+      return;
+    }
+    this._settings.set_value('formatting-defaults', new GLib.Variant('s', serializeFormatting(this._formattingDefaults)));
+  }
+
+  // Sanitizes and stores a single-field update to this._formattingDefaults
+  // (e.g. { boldCity: true }), then persists it. Shared by the three bold
+  // switches built in _buildFormattingSubmenu() and by
+  // _selectFontSizePreset()/_selectColorPreset() below, so every write to
+  // this._formattingDefaults goes through sanitizeFormatting() exactly
+  // once, in one place.
+  _setFormattingDefaultField(field, value) {
+    this._formattingDefaults = sanitizeFormatting({ ...this._formattingDefaults, [field]: value });
+    this._saveFormattingDefaults();
+  }
+
   _initMenu() {
     this._menu = this._button.menu;
     this._activeMenu = this._createScrollableMenuSection();
@@ -411,6 +534,17 @@ export default class TimezonesExtension extends Extension {
     this._addConfigSwitch({ label: 'Show timezone', name: 'showTimezone' });
     this._addConfigSwitch({ label: 'Hide system clock', name: 'hideSystemClock' });
     this._addConfigSwitch({ label: 'Show separator', name: 'showSeparator' });
+
+    // Phase 3: separator picker + global formatting defaults, grouped
+    // under their own submenus (menu real estate is limited, and these
+    // are multi-choice/multi-control pickers rather than single toggles)
+    // rather than adding many more top-level rows. Both are added right
+    // after the existing boolean switches and before the blank separator
+    // + 'Clear clocks' action further below, so existing layout/ordering
+    // is otherwise unchanged.
+    this._buildSeparatorSubmenu();
+    this._buildFormattingSubmenu();
+
     this._activeMenu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem('Active clocks'));
 
     // Feature A (DnD, end-of-list drop): the active section's box actor is
@@ -504,33 +638,256 @@ export default class TimezonesExtension extends Extension {
   // actually set to right now" and is used instead, eliminating any
   // possible mismatch between the two. Boolean(...) is applied explicitly
   // so only a real primitive boolean is ever stored/persisted.
-  _addConfigSwitch({ label, name }) {
-    let configSwitch = new PopupMenu.PopupSwitchMenuItem(label, this._config[name]);
+  // Phase 3 EXTENSION: generalized with optional `parentMenu` (defaults
+  // to this._configMenu, so every pre-Phase-3 call site above is
+  // unchanged) and optional `getValue`/`setValue` (defaulting to reading/
+  // writing this._config[name] + _saveSettings(), i.e. exactly the
+  // original behavior). This lets the three bold-flag switches below
+  // (_buildFormattingSubmenu()) reuse this same widget/sync machinery
+  // while persisting into this._formattingDefaults / the
+  // 'formatting-defaults' gsetting instead of into the 'config' a{sb}
+  // key -- their name ('formattingBoldCity' etc.) is deliberately NOT a
+  // member of CONFIG_KEYS and is never written into this._config, so the
+  // 'config' key's shape/contents are completely unaffected by this
+  // phase.
+  _addConfigSwitch({ label, name, parentMenu, getValue, setValue }) {
+    let menu = parentMenu || this._configMenu;
+    let readValue = getValue || (() => this._config[name]);
+    let writeValue =
+      setValue ||
+      ((value) => {
+        this._config[name] = value;
+        this._saveSettings();
+      });
+
+    let configSwitch = new PopupMenu.PopupSwitchMenuItem(label, Boolean(readValue()));
+    // Automation-friendly per project convention: PopupMenuItem/
+    // PopupSwitchMenuItem/PopupSubMenuMenuItem are all plain St.BoxLayout
+    // subclasses (they ARE the actor, no separate `.actor` property), and
+    // St/Clutter actors expose a settable `accessible_name` (backed by
+    // Atk) -- this is the only stable, explicit "name" the shell popup
+    // menu API offers per-row, so it's set everywhere a new row is built
+    // in this phase (here, and in the submenu builders below).
+    configSwitch.accessible_name = label;
     configSwitch.connect('toggled', (item) => {
-      this._config[name] = Boolean(item.state);
-      this._saveSettings();
+      // Reentrancy guard (see the settings 'changed' handler in enable()
+      // for the full explanation): setToggleState() -- called by
+      // _syncConfigSwitches() -- synchronously emits 'toggled' when it
+      // actually changes the switch's visual state, which is exactly
+      // what happens when this sync is resolving a stale switch during
+      // an external-change resync. Without this guard that would write
+      // the (already-current) value straight back to gsettings from
+      // inside the resync that just read it. This never blocks a real
+      // user click: this._applyingExternalSettings is only ever true
+      // while the 'changed' handler's own synchronous call stack is
+      // still running.
+      if (this._applyingExternalSettings) {
+        return;
+      }
+      writeValue(Boolean(item.state));
       this._updateLabel();
-      // Cheap/simple to call unconditionally for every config switch (not
-      // just 'hideSystemClock'): it no-ops instantly when the visibility
-      // already matches this._config.hideSystemClock. This is also what
-      // makes the switch apply immediately -- the user sees the system
-      // clock vanish/reappear the moment they flip it, no restart needed.
+      // Cheap/simple to call unconditionally for every config switch
+      // (not just 'hideSystemClock'): it no-ops instantly when the
+      // visibility already matches this._config.hideSystemClock. Also
+      // harmless (still a no-op) for the Phase 3 bold-flag switches added
+      // via this same method, since they never touch hideSystemClock.
       this._applySystemClockVisibility();
     });
-    this._configSwitches[name] = configSwitch;
-    this._configMenu.addMenuItem(configSwitch);
+    this._configSwitches[name] = { item: configSwitch, getValue: readValue };
+    menu.addMenuItem(configSwitch);
   }
 
   // Belt-and-suspenders companion to the fix above: forces every config
-  // switch's VISUAL state back to match this._config (the authoritative,
-  // persisted value) every time the menu opens (see _updateMenu()). This
-  // means even if a switch's displayed toggle position and this._config
-  // ever did desync for any reason, reopening the menu self-heals the
-  // visual -- the stored value always wins.
+  // switch's VISUAL state back to match its authoritative source value
+  // every time the menu opens (see _updateMenu()) or an external
+  // gsettings change is observed (see the 'changed' handler in enable()).
+  // This means even if a switch's displayed toggle position and its
+  // stored value ever did desync for any reason, the visual self-heals --
+  // the stored value always wins. Phase 3 EXTENSION: reads each entry's
+  // own `getValue` (this._config[name] for the original boolean switches,
+  // this._formattingDefaults.boldCity/boldTime/boldZone for the Phase 3
+  // bold-flag switches) instead of unconditionally reading
+  // this._config[name], so the bold switches are covered by the exact
+  // same self-healing guarantee without reading a key that doesn't exist
+  // in this._config for them.
   _syncConfigSwitches() {
     Object.keys(this._configSwitches).forEach((name) => {
-      this._configSwitches[name].setToggleState(Boolean(this._config[name]));
+      let entry = this._configSwitches[name];
+      entry.item.setToggleState(Boolean(entry.getValue()));
     });
+  }
+
+  // Phase 3: builds the "Separator" submenu listing exactly the curated
+  // SEPARATORS entries (separators.js), each shown with its label and a
+  // literal preview of its value. Selecting a row persists that entry's
+  // `id` to the 'separator' gsetting (see _selectSeparator()) -- the
+  // stored key is always an id, never a raw literal, when chosen through
+  // this UI (a hand-edited/tampered literal value is still supported for
+  // rendering via resolveSeparatorValue()'s fallback, it just never shows
+  // as "selected" here -- see _syncSeparatorSubmenu()).
+  _buildSeparatorSubmenu() {
+    let separatorItem = new PopupMenu.PopupSubMenuMenuItem('Separator');
+    separatorItem.accessible_name = 'Separator picker';
+
+    SEPARATORS.forEach((entry) => {
+      let row = new PopupMenu.PopupMenuItem(`${entry.label}  "${entry.value}"`);
+      row.accessible_name = `Separator: ${entry.label}`;
+      row.connect('activate', () => this._selectSeparator(entry.id));
+      separatorItem.menu.addMenuItem(row);
+      this._separatorMenuItems[entry.id] = row;
+    });
+
+    this._configMenu.addMenuItem(separatorItem);
+    this._syncSeparatorSubmenu();
+  }
+
+  // Persists the chosen curated separator id, refreshes which submenu row
+  // shows the selection ornament, and re-renders the panel immediately
+  // (acceptance criterion: no reload required).
+  _selectSeparator(id) {
+    this._separatorId = id;
+    this._saveSeparatorSetting();
+    this._syncSeparatorSubmenu();
+    this._updateLabel();
+  }
+
+  // Marks exactly the row matching this._separatorId with Ornament.DOT
+  // (GNOME 45+'s PopupMenu.Ornament -- verified present in this GNOME
+  // Shell's popupMenu.js as NONE/DOT/CHECK/HIDDEN/NO_DOT) and clears
+  // every other row's ornament. If this._separatorId is '' (never
+  // touched this control -- legacy fallback, see _resolveSeparatorValue())
+  // or a hand-edited literal that doesn't match any curated id, no row is
+  // marked -- degrades gracefully rather than mis-highlighting anything.
+  _syncSeparatorSubmenu() {
+    Object.keys(this._separatorMenuItems).forEach((id) => {
+      this._separatorMenuItems[id].setOrnament(
+        id === this._separatorId ? PopupMenu.Ornament.DOT : PopupMenu.Ornament.NONE
+      );
+    });
+  }
+
+  // Phase 3: builds the "Formatting" submenu (default font size, default
+  // color, per-segment bold) -- global defaults only; per-entry/per-zone
+  // formatting controls are out of scope for this phase (Phase 4's
+  // prefs.js). Grouped under one submenu per the real-estate constraint
+  // instead of five more top-level config rows.
+  _buildFormattingSubmenu() {
+    let formattingItem = new PopupMenu.PopupSubMenuMenuItem('Formatting');
+    formattingItem.accessible_name = 'Formatting defaults';
+    this._configMenu.addMenuItem(formattingItem);
+
+    this._buildFontSizeSubmenu(formattingItem.menu);
+    this._buildColorSubmenu(formattingItem.menu);
+
+    this._addConfigSwitch({
+      label: 'Bold city',
+      name: 'formattingBoldCity',
+      parentMenu: formattingItem.menu,
+      getValue: () => this._formattingDefaults.boldCity,
+      setValue: (value) => this._setFormattingDefaultField('boldCity', value),
+    });
+    this._addConfigSwitch({
+      label: 'Bold time',
+      name: 'formattingBoldTime',
+      parentMenu: formattingItem.menu,
+      getValue: () => this._formattingDefaults.boldTime,
+      setValue: (value) => this._setFormattingDefaultField('boldTime', value),
+    });
+    this._addConfigSwitch({
+      label: 'Bold zone',
+      name: 'formattingBoldZone',
+      parentMenu: formattingItem.menu,
+      getValue: () => this._formattingDefaults.boldZone,
+      setValue: (value) => this._setFormattingDefaultField('boldZone', value),
+    });
+  }
+
+  // Nested "Font size" submenu: a small preset ladder (formattingPresets.js
+  // FONT_SIZE_PRESETS), every value of which is verified by
+  // tests/run-tests.js to survive sanitizeFontSize() unchanged. Values
+  // still flow through sanitizeFormatting() (via _setFormattingDefaultField()
+  // -> serializeFormatting()) on the way to gsettings regardless -- this is
+  // defense in depth, not a substitute for that sanitization boundary.
+  _buildFontSizeSubmenu(parentMenu) {
+    let sizeItem = new PopupMenu.PopupSubMenuMenuItem('Font size');
+    sizeItem.accessible_name = 'Default font size';
+
+    FONT_SIZE_PRESETS.forEach((preset) => {
+      let row = new PopupMenu.PopupMenuItem(preset.label);
+      row.accessible_name = `Font size: ${preset.label}`;
+      row.connect('activate', () => this._selectFontSizePreset(preset.value));
+      sizeItem.menu.addMenuItem(row);
+      this._fontSizeMenuItems[preset.id] = row;
+    });
+
+    parentMenu.addMenuItem(sizeItem);
+    this._syncFontSizeSubmenu();
+  }
+
+  _selectFontSizePreset(value) {
+    this._setFormattingDefaultField('size', value);
+    this._syncFontSizeSubmenu();
+    this._updateLabel();
+  }
+
+  // Uses the pure resolvePresetId() helper (formattingPresets.js) to find
+  // which preset (if any) matches the current default size; degrades to
+  // "no row marked" for a hand-edited dconf value that isn't in the
+  // curated ladder (e.g. 13), rather than throwing or guessing.
+  _syncFontSizeSubmenu() {
+    let selectedId = resolvePresetId(FONT_SIZE_PRESETS, this._formattingDefaults.size);
+    Object.keys(this._fontSizeMenuItems).forEach((id) => {
+      this._fontSizeMenuItems[id].setOrnament(id === selectedId ? PopupMenu.Ornament.DOT : PopupMenu.Ornament.NONE);
+    });
+  }
+
+  // Nested "Color" submenu: a small named palette (formattingPresets.js
+  // COLOR_PALETTE), every value of which is verified by tests/run-tests.js
+  // to survive sanitizeColor() unchanged. No freeform color entry here by
+  // design -- that belongs in Phase 4's prefs.js, which can offer a real
+  // GTK color chooser; the shell popup menu has no equivalent widget.
+  _buildColorSubmenu(parentMenu) {
+    let colorItem = new PopupMenu.PopupSubMenuMenuItem('Color');
+    colorItem.accessible_name = 'Default color';
+
+    COLOR_PALETTE.forEach((preset) => {
+      let row = new PopupMenu.PopupMenuItem(preset.label);
+      row.accessible_name = `Color: ${preset.label}`;
+      row.connect('activate', () => this._selectColorPreset(preset.value));
+      colorItem.menu.addMenuItem(row);
+      this._colorMenuItems[preset.id] = row;
+    });
+
+    parentMenu.addMenuItem(colorItem);
+    this._syncColorSubmenu();
+  }
+
+  _selectColorPreset(value) {
+    this._setFormattingDefaultField('color', value);
+    this._syncColorSubmenu();
+    this._updateLabel();
+  }
+
+  // Same degrade-gracefully behavior as _syncFontSizeSubmenu(), for a
+  // hand-edited dconf color value that isn't in the curated palette
+  // (e.g. '#123456').
+  _syncColorSubmenu() {
+    let selectedId = resolvePresetId(COLOR_PALETTE, this._formattingDefaults.color);
+    Object.keys(this._colorMenuItems).forEach((id) => {
+      this._colorMenuItems[id].setOrnament(id === selectedId ? PopupMenu.Ornament.DOT : PopupMenu.Ornament.NONE);
+    });
+  }
+
+  // Refreshes every Phase 3 picker's visual selection state (separator +
+  // font size + color ornaments) without touching this._configSwitches
+  // (that's still _syncConfigSwitches(), called separately by
+  // _updateMenu() and covers the bold switches too). Shared by
+  // _updateMenu() (menu-open resync) and the settings 'changed' handler
+  // in enable() (external-change resync).
+  _syncMenuControls() {
+    this._syncSeparatorSubmenu();
+    this._syncFontSizeSubmenu();
+    this._syncColorSubmenu();
   }
 
   // Hides/shows GNOME Shell's own top-bar clock label to match
@@ -714,6 +1071,7 @@ export default class TimezonesExtension extends Extension {
     this._updateActiveMenu();
     this._updateInactiveMenu();
     this._syncConfigSwitches();
+    this._syncMenuControls();
   }
 
   _updateTimeLabels() {
