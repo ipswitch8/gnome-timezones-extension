@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Compiled at test-run time (see run-prefs-tests.js) into a throwaway
+  GResource registered under /org/gnome/Shell/Extensions/js/extensions/
+  prefs.js -- the exact resource path prefs.js's real, unmodified import
+  statement expects. See extension-preferences.js's header comment for
+  why this exists.
+-->
+<gresources>
+  <gresource prefix="/org/gnome/Shell/Extensions/js/extensions">
+    <file alias="prefs.js">extension-preferences.js</file>
+  </gresource>
+</gresources>

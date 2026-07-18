@@ -22,6 +22,7 @@ import {
   DEFAULT_FORMATTING,
   buildEntryText,
   buildEntryMarkup,
+  getEffectiveFormatting,
 } from './formatting.js';
 import { SEPARATORS, resolveSeparatorValue } from './separators.js';
 import { FONT_SIZE_PRESETS, COLOR_PALETTE, resolvePresetId } from './formattingPresets.js';
@@ -386,6 +387,19 @@ export default class TimezonesExtension extends Extension {
 
     let formattingDefaultsVariant = this._settings.get_value('formatting-defaults');
     this._formattingDefaults = parseFormatting(formattingDefaultsVariant.deep_unpack());
+    // KEEP THIS PRE-PARSE. getEffectiveFormatting() (formatting.js) now
+    // accepts either raw JSON strings OR pre-parsed objects for both
+    // this._formatting[zone] and this._formattingDefaults -- it no longer
+    // REQUIRES this pre-parse for correctness (that was the bug: prefs.js
+    // doesn't pre-parse, and used to silently get a raw string back). But
+    // _getEffectiveFormatting() is called once per active zone on every
+    // _updateLabel() -- i.e. every clock tick (see the WallClock
+    // 'notify::clock' handler in enable()) -- so re-running
+    // JSON.parse()+sanitizeFormatting() per zone per tick here, instead of
+    // once per _loadSettings() call (enable() and every external
+    // 'changed' event), would be pure per-tick waste for a value that
+    // essentially never changes between ticks. Do not "simplify" this
+    // away by deferring the parse into getEffectiveFormatting() calls.
   }
 
   // Pure reconciliation used when loading settings: takes the stored
@@ -1000,10 +1014,7 @@ export default class TimezonesExtension extends Extension {
   // still gets DEFAULT_FORMATTING's neutral values for its other fields,
   // matching the 'formatting' schema key's documented shape.
   _getEffectiveFormatting(zone) {
-    if (this._formatting && Object.prototype.hasOwnProperty.call(this._formatting, zone)) {
-      return this._formatting[zone];
-    }
-    return this._formattingDefaults || DEFAULT_FORMATTING;
+    return getEffectiveFormatting(zone, this._formatting, this._formattingDefaults);
   }
 
   // Computes the three raw (unescaped, unformatted) segments -- city/

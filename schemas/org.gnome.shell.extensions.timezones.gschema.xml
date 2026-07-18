@@ -20,7 +20,7 @@
     <key name="formatting" type="a{ss}">
       <default>{}</default>
       <summary>Per-zone custom text formatting</summary>
-      <description>Maps an IANA timezone id to a JSON-encoded per-entry formatting object of the shape {"size": &lt;int pt or 0=inherit&gt;, "color": "#rrggbb" or "", "boldCity": bool, "boldTime": bool, "boldZone": bool}. Missing or empty entries fall back to "formatting-defaults", and ultimately to the current appearance.</description>
+      <description>Maps an IANA timezone id to a JSON-encoded per-entry formatting object of the shape {"size": &lt;int pt or 0=inherit&gt;, "color": "#rrggbb" or "", "boldCity": bool, "boldTime": bool, "boldZone": bool}. Missing or empty entries fall back to "formatting-defaults", and ultimately to the current appearance. Each entry is a WHOLE blob, not a per-field diff against "formatting-defaults": setting only one field for a zone (e.g. via prefs.js) locks in the *current* "formatting-defaults" values for that zone's other fields at the moment of that edit, and the zone's override stops tracking future "formatting-defaults" changes for those other fields from then on.</description>
     </key>
     <key name="formatting-defaults" type="s">
       <default>""</default>

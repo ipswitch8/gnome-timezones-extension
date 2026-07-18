@@ -19,6 +19,9 @@ import {
   DEFAULT_FORMATTING,
   buildEntryText,
   buildEntryMarkup,
+  setZoneFormatting,
+  rgbaToHex,
+  getEffectiveFormatting,
 } from '../formatting.js';
 
 import {
@@ -594,6 +597,197 @@ test('serializeFormatting/parseFormatting: round-trips every color preset as a g
     const defaults = { ...DEFAULT_FORMATTING, color: preset.value };
     assertEqual(parseFormatting(serializeFormatting(defaults)), defaults);
   }
+});
+
+// ---------------------------------------------------------------------
+// setZoneFormatting -- read-modify-write of the 'formatting' a{ss} map
+// (Phase 4: prefs.js per-zone controls)
+// ---------------------------------------------------------------------
+
+test('setZoneFormatting: setting one zone preserves an unrelated existing zone', () => {
+  const before = { 'America/New_York': serializeFormatting({ ...DEFAULT_FORMATTING, size: 12 }) };
+  const after = setZoneFormatting(before, 'Europe/London', { ...DEFAULT_FORMATTING, boldCity: true });
+  assertEqual(after['America/New_York'], before['America/New_York']);
+  assertEqual(parseFormatting(after['Europe/London']), { ...DEFAULT_FORMATTING, boldCity: true });
+});
+
+test('setZoneFormatting: does not mutate the input map', () => {
+  const before = { UTC: serializeFormatting(DEFAULT_FORMATTING) };
+  const beforeSnapshot = { ...before };
+  setZoneFormatting(before, 'UTC', { ...DEFAULT_FORMATTING, size: 20 });
+  assertEqual(before, beforeSnapshot);
+});
+
+test('setZoneFormatting: stored value is a sanitized JSON string', () => {
+  const after = setZoneFormatting({}, 'UTC', { size: 999999, color: 'not-a-color', boldCity: 'yes' });
+  assertTrue(typeof after.UTC === 'string', 'expected a string value');
+  assertEqual(JSON.parse(after.UTC), sanitizeFormatting({ size: 999999, color: 'not-a-color', boldCity: 'yes' }));
+});
+
+test('setZoneFormatting: passing null REMOVES the zone entry (falls back to defaults)', () => {
+  const before = { UTC: serializeFormatting({ ...DEFAULT_FORMATTING, size: 12 }), Other: serializeFormatting(DEFAULT_FORMATTING) };
+  const after = setZoneFormatting(before, 'UTC', null);
+  assertFalse(Object.prototype.hasOwnProperty.call(after, 'UTC'), 'UTC entry should be removed');
+  assertTrue(Object.prototype.hasOwnProperty.call(after, 'Other'), 'unrelated Other entry should survive');
+});
+
+test('setZoneFormatting: passing undefined also removes the zone entry', () => {
+  const before = { UTC: serializeFormatting({ ...DEFAULT_FORMATTING, size: 12 }) };
+  const after = setZoneFormatting(before, 'UTC', undefined);
+  assertFalse(Object.prototype.hasOwnProperty.call(after, 'UTC'));
+});
+
+test('setZoneFormatting: passing a neutral (all-default) blob removes the entry rather than storing it', () => {
+  const before = { UTC: serializeFormatting({ ...DEFAULT_FORMATTING, size: 12 }) };
+  const after = setZoneFormatting(before, 'UTC', { ...DEFAULT_FORMATTING });
+  assertFalse(Object.prototype.hasOwnProperty.call(after, 'UTC'), 'neutral blob should not be stored');
+});
+
+test('setZoneFormatting: removing a zone that was never present is a safe no-op', () => {
+  const before = { UTC: serializeFormatting({ ...DEFAULT_FORMATTING, size: 12 }) };
+  const after = setZoneFormatting(before, 'Europe/London', null);
+  assertEqual(after, before);
+});
+
+test('setZoneFormatting: setting a non-neutral value round-trips through parseFormatting', () => {
+  const after = setZoneFormatting({}, 'Asia/Tokyo', { ...DEFAULT_FORMATTING, color: '#ff0000', boldTime: true });
+  assertEqual(parseFormatting(after['Asia/Tokyo']), { ...DEFAULT_FORMATTING, color: '#ff0000', boldTime: true });
+});
+
+test('setZoneFormatting: undefined input map treated as empty', () => {
+  const after = setZoneFormatting(undefined, 'UTC', { ...DEFAULT_FORMATTING, size: 10 });
+  assertEqual(parseFormatting(after.UTC), { ...DEFAULT_FORMATTING, size: 10 });
+});
+
+// ---------------------------------------------------------------------
+// rgbaToHex -- GTK RGBA float -> '#rrggbb' conversion (Phase 4: color
+// picker widgets)
+// ---------------------------------------------------------------------
+
+test('rgbaToHex: black (0,0,0)', () => assertEqual(rgbaToHex({ red: 0, green: 0, blue: 0 }), '#000000'));
+test('rgbaToHex: white (1,1,1)', () => assertEqual(rgbaToHex({ red: 1, green: 1, blue: 1 }), '#ffffff'));
+test('rgbaToHex: pure red', () => assertEqual(rgbaToHex({ red: 1, green: 0, blue: 0 }), '#ff0000'));
+test('rgbaToHex: pure green', () => assertEqual(rgbaToHex({ red: 0, green: 1, blue: 0 }), '#00ff00'));
+test('rgbaToHex: pure blue', () => assertEqual(rgbaToHex({ red: 0, green: 0, blue: 1 }), '#0000ff'));
+test('rgbaToHex: midpoint 0.5 rounds to 0x80', () =>
+  assertEqual(rgbaToHex({ red: 0.5, green: 0.5, blue: 0.5 }), '#808080'));
+test('rgbaToHex: rounding boundary just below a half-step rounds down', () => {
+  // 127/255 = 0.498..., rounds to 127 (0x7f), not 128.
+  assertEqual(rgbaToHex({ red: 127 / 255 - 0.001, green: 0, blue: 0 }), '#7f0000');
+});
+test('rgbaToHex: rounding boundary just above a half-step rounds up', () => {
+  // 128/255 = 0.50196..., rounds to 128 (0x80), not 127.
+  assertEqual(rgbaToHex({ red: 128 / 255, green: 0, blue: 0 }), '#800000');
+});
+test('rgbaToHex: out-of-range negative float clamps to 0', () =>
+  assertEqual(rgbaToHex({ red: -0.5, green: 0, blue: 0 }), '#000000'));
+test('rgbaToHex: out-of-range >1 float clamps to 1', () =>
+  assertEqual(rgbaToHex({ red: 1.5, green: 0, blue: 0 }), '#ff0000'));
+test('rgbaToHex: missing/undefined channels treated as 0', () => assertEqual(rgbaToHex({}), '#000000'));
+test('rgbaToHex: NaN channel treated as 0', () => assertEqual(rgbaToHex({ red: NaN, green: 0, blue: 0 }), '#000000'));
+test('rgbaToHex: alpha field is ignored', () =>
+  assertEqual(rgbaToHex({ red: 1, green: 1, blue: 1, alpha: 0 }), '#ffffff'));
+
+test('rgbaToHex: every output survives sanitizeColor unchanged', () => {
+  const samples = [
+    { red: 0, green: 0, blue: 0 },
+    { red: 1, green: 1, blue: 1 },
+    { red: 0.5, green: 0.25, blue: 0.75 },
+    { red: 1.5, green: -1, blue: 0.3333 },
+  ];
+  for (const sample of samples) {
+    const hex = rgbaToHex(sample);
+    assertEqual(sanitizeColor(hex), hex, `sanitizeColor changed ${hex}`);
+  }
+});
+
+// ---------------------------------------------------------------------
+// getEffectiveFormatting -- per-zone -> defaults -> DEFAULT_FORMATTING
+// precedence (Phase 4: shared by extension.js and prefs.js)
+// ---------------------------------------------------------------------
+
+test('getEffectiveFormatting: per-zone override wins over defaults', () => {
+  const perZone = { ...DEFAULT_FORMATTING, size: 20 };
+  const defaults = { ...DEFAULT_FORMATTING, size: 10 };
+  assertEqual(getEffectiveFormatting('UTC', { UTC: perZone }, defaults), perZone);
+});
+
+test('getEffectiveFormatting: falls back to global defaults when no per-zone override', () => {
+  const defaults = { ...DEFAULT_FORMATTING, color: '#ff0000' };
+  assertEqual(getEffectiveFormatting('UTC', {}, defaults), defaults);
+});
+
+test('getEffectiveFormatting: falls back to DEFAULT_FORMATTING when defaults is falsy', () => {
+  assertEqual(getEffectiveFormatting('UTC', {}, null), DEFAULT_FORMATTING);
+  assertEqual(getEffectiveFormatting('UTC', {}, undefined), DEFAULT_FORMATTING);
+});
+
+test('getEffectiveFormatting: a partially-specified per-zone override is returned whole (no field-merge)', () => {
+  const partial = { ...DEFAULT_FORMATTING, boldCity: true };
+  const defaults = { ...DEFAULT_FORMATTING, size: 16, color: '#00ff00' };
+  const result = getEffectiveFormatting('UTC', { UTC: partial }, defaults);
+  assertEqual(result, partial);
+  // Confirms it is NOT merged with defaults -- size/color stay neutral,
+  // matching the documented "no per-field merge" behavior.
+  assertEqual(result.size, 0);
+  assertEqual(result.color, '');
+});
+
+test('getEffectiveFormatting: falsy formattingMap treated as no override', () => {
+  const defaults = { ...DEFAULT_FORMATTING, size: 14 };
+  assertEqual(getEffectiveFormatting('UTC', null, defaults), defaults);
+  assertEqual(getEffectiveFormatting('UTC', undefined, defaults), defaults);
+});
+
+// ---------------------------------------------------------------------
+// getEffectiveFormatting -- REGRESSION: must accept a raw-JSON-string map
+// (prefs.js's shape) or a pre-parsed-object map (extension.js's shape)
+// and return an EQUIVALENT normalized object either way. This is the
+// exact invariant that was violated: prefs.js's readFormattingMap()
+// returns the raw 'formatting' a{ss} map (values are JSON strings), so
+// for any zone with an existing override, getEffectiveFormatting() used
+// to hand back that raw JSON STRING verbatim instead of a parsed object
+// -- every prefs.js widget then silently displayed neutral defaults
+// (size 0, color '', all bold off) instead of the zone's real saved
+// values, for the mainline case of reopening prefs on an
+// already-customized zone. extension.js never hit this because
+// _loadSettings() happens to pre-parse every entry before calling this
+// function -- an implicit "caller must pre-parse" contract that was
+// never enforced or even documented until this bug.
+// ---------------------------------------------------------------------
+
+test('getEffectiveFormatting: per-zone override as a raw JSON STRING (prefs.js shape) is parsed, not returned verbatim', () => {
+  const fmt = { size: 24, color: '#123456', boldCity: true, boldTime: false, boldZone: true };
+  const stringMap = { UTC: serializeFormatting(fmt) };
+  const result = getEffectiveFormatting('UTC', stringMap, DEFAULT_FORMATTING);
+  assertTrue(typeof result === 'object' && result !== null, `expected a parsed object, got ${JSON.stringify(result)} (typeof ${typeof result})`);
+  assertEqual(result, fmt);
+});
+
+test('getEffectiveFormatting: raw-JSON-string map and pre-parsed-object map yield an EQUIVALENT result for the same zone', () => {
+  const fmt = { size: 24, color: '#123456', boldCity: true, boldTime: false, boldZone: true };
+  const stringMap = { UTC: serializeFormatting(fmt) };
+  const objectMap = { UTC: sanitizeFormatting(fmt) };
+  assertEqual(getEffectiveFormatting('UTC', stringMap, DEFAULT_FORMATTING), getEffectiveFormatting('UTC', objectMap, DEFAULT_FORMATTING));
+});
+
+test('getEffectiveFormatting: formattingDefaults as a raw JSON STRING (GSettings shape) is parsed, not returned verbatim', () => {
+  const defaults = { ...DEFAULT_FORMATTING, size: 18, boldTime: true };
+  const result = getEffectiveFormatting('UTC', {}, serializeFormatting(defaults));
+  assertTrue(typeof result === 'object' && result !== null, `expected a parsed object, got ${JSON.stringify(result)} (typeof ${typeof result})`);
+  assertEqual(result, defaults);
+});
+
+test('getEffectiveFormatting: raw-JSON-string defaults and pre-parsed-object defaults yield an EQUIVALENT result', () => {
+  const defaults = { ...DEFAULT_FORMATTING, size: 18, boldTime: true };
+  assertEqual(
+    getEffectiveFormatting('UTC', {}, serializeFormatting(defaults)),
+    getEffectiveFormatting('UTC', {}, sanitizeFormatting(defaults))
+  );
+});
+
+test('getEffectiveFormatting: empty-string formattingDefaults (schema default, "no defaults set") still falls back to DEFAULT_FORMATTING-equivalent values', () => {
+  assertEqual(getEffectiveFormatting('UTC', {}, ''), DEFAULT_FORMATTING);
 });
 
 // ---------------------------------------------------------------------
