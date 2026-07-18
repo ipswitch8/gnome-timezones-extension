@@ -156,3 +156,98 @@ export function parseFormatting(jsonString) {
 export function serializeFormatting(obj) {
   return JSON.stringify(sanitizeFormatting(obj));
 }
+
+// ---------------------------------------------------------------------
+// Segment assembly (Phase 2: panel/menu rendering)
+// ---------------------------------------------------------------------
+//
+// A rendered entry is built from three logical segments -- city (or
+// alias/label), zone abbreviation, and time -- joined with a single
+// space, mirroring the pre-Phase-2 legacy format exactly:
+//
+//   `${timezoneLabel}${offset}${time}`
+//
+// where `offset` was ` ${now.format('%Z')} ` when the zone abbreviation
+// was shown, or a single ' ' otherwise. That is equivalent to:
+//
+//   zone shown:     `${city} ${zone} ${time}`
+//   zone hidden:    `${city} ${time}`
+//
+// `zone` being `null`/`undefined` means "hidden" (matching the legacy
+// boolean branch); an empty-string zone is still treated as "shown"
+// (callers only pass a real string when the zone segment should render).
+// Callers are responsible for producing `city`/`zone`/`time` themselves
+// (extension.js computes them from GLib.DateTime + this._config); these
+// functions only assemble and (for the markup variant) escape/format them.
+
+/**
+ * Assemble the plain-text (no markup) form of an entry. Byte-identical
+ * to the pre-Phase-2 legacy `_getLabelForTimezone` output for the same
+ * inputs -- used for the 'full' form consumed by menu rows and the drag
+ * preview, which render as plain St.Label text and must never see raw
+ * markup syntax.
+ */
+export function buildEntryText({ city, zone, time }) {
+  const cityStr = city ?? '';
+  const timeStr = time ?? '';
+
+  if (zone === null || zone === undefined) {
+    return `${cityStr} ${timeStr}`;
+  }
+
+  return `${cityStr} ${zone} ${timeStr}`;
+}
+
+// Wraps already-escaped text in a <b>...</b> span when `bold` is true.
+function boldSegment(escapedText, bold) {
+  return bold ? `<b>${escapedText}</b>` : escapedText;
+}
+
+/**
+ * Assemble the Pango-markup form of an entry. Every dynamic segment is
+ * escaped via escapeMarkup() before insertion. `fmt` is defensively
+ * re-sanitized via sanitizeFormatting() regardless of whether the caller
+ * already sanitized it (this is a security boundary, not merely
+ * cosmetic, so it never trusts its input). Each of boldCity/boldTime/
+ * boldZone independently wraps only its own segment. size/color (when
+ * non-neutral) wrap the WHOLE assembled entry in a single outer <span>;
+ * when both are neutral (0 / ''), no outer <span> is emitted at all, so
+ * an unconfigured entry's markup is exactly the escaped equivalent of
+ * buildEntryText()'s output (plus any <b> tags from bold flags).
+ */
+export function buildEntryMarkup({ city, zone, time }, fmt) {
+  const f = sanitizeFormatting(fmt);
+
+  const citySeg = boldSegment(escapeMarkup(city ?? ''), f.boldCity);
+  const timeSeg = boldSegment(escapeMarkup(time ?? ''), f.boldTime);
+
+  let inner;
+  if (zone === null || zone === undefined) {
+    inner = `${citySeg} ${timeSeg}`;
+  } else {
+    const zoneSeg = boldSegment(escapeMarkup(zone), f.boldZone);
+    inner = `${citySeg} ${zoneSeg} ${timeSeg}`;
+  }
+
+  const attrs = [];
+
+  const size = sanitizeFontSize(f.size);
+  if (size !== 0) {
+    // Pango markup 'size' attribute is expressed in 1024ths of a point.
+    attrs.push(`size="${size * 1024}"`);
+  }
+
+  const color = sanitizeColor(f.color);
+  if (color !== '') {
+    // sanitizeColor() guarantees this matches ^#[0-9a-f]{6}$ exactly, so
+    // it can never contain a quote/angle-bracket that would break out of
+    // this attribute.
+    attrs.push(`foreground="${color}"`);
+  }
+
+  if (attrs.length === 0) {
+    return inner;
+  }
+
+  return `<span ${attrs.join(' ')}>${inner}</span>`;
+}

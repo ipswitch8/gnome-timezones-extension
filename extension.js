@@ -14,6 +14,14 @@ import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
 import timezones from './timezones.js';
 import cityAliases from './cityAliases.js';
+import {
+  escapeMarkup,
+  parseFormatting,
+  DEFAULT_FORMATTING,
+  buildEntryText,
+  buildEntryMarkup,
+} from './formatting.js';
+import { resolveSeparatorValue } from './separators.js';
 
 // Whitelist of the only config keys this extension ever reads/writes.
 // Anything else present in the 'config' GSettings value (e.g. from a
@@ -62,6 +70,15 @@ export default class TimezonesExtension extends Extension {
     };
     this._hint = '';
     this._labels = {};
+    // Phase 2 formatting/separator state, populated by _loadSettings()
+    // below. this._separatorId is the raw stored 'separator' key value
+    // (resolved to a literal at render time via resolveSeparatorValue());
+    // this._formatting maps zone id -> normalized formatting object
+    // (parseFormatting() output); this._formattingDefaults is the single
+    // normalized global-default formatting object.
+    this._separatorId = '';
+    this._formatting = {};
+    this._formattingDefaults = { ...DEFAULT_FORMATTING };
     // Tracks whether WE hid GNOME Shell's own top-bar clock, so disable()
     // only ever restores visibility it actually changed (see
     // _applySystemClockVisibility()).
@@ -215,6 +232,9 @@ export default class TimezonesExtension extends Extension {
     this._configSwitches = null;
     this._dropIndicator = null;
     this._rowDraggables = null;
+    this._separatorId = null;
+    this._formatting = null;
+    this._formattingDefaults = null;
   }
 
   _loadSettings() {
@@ -259,6 +279,28 @@ export default class TimezonesExtension extends Extension {
         this._labels[zone] = sanitized;
       }
     });
+
+    // Phase 2: separator + per-entry/global formatting. Resolution to an
+    // actual literal value/effective-formatting-object happens at render
+    // time (_resolveSeparatorValue()/_getEffectiveFormatting()) -- here we
+    // only load and normalize the raw stored values.
+    let separatorVariant = this._settings.get_value('separator');
+    this._separatorId = separatorVariant.deep_unpack();
+
+    let formattingVariant = this._settings.get_value('formatting');
+    let formattingObj = formattingVariant.deep_unpack();
+    this._formatting = {};
+    Object.keys(formattingObj).forEach((zone) => {
+      // Same defensive pattern as 'labels' above: drop entries for zones
+      // this extension doesn't know about (stale/foreign dconf entry).
+      if (!this._state.some((item) => item.timezone === zone)) {
+        return;
+      }
+      this._formatting[zone] = parseFormatting(formattingObj[zone]);
+    });
+
+    let formattingDefaultsVariant = this._settings.get_value('formatting-defaults');
+    this._formattingDefaults = parseFormatting(formattingDefaultsVariant.deep_unpack());
   }
 
   // Pure reconciliation used when loading settings: takes the stored
@@ -525,25 +567,102 @@ export default class TimezonesExtension extends Extension {
 
   // Feature A: iterates this._activeOrder (not this._state) so the panel
   // text reflects the user's chosen order rather than alphabetical.
-  // Feature B: joins with ' | ' when showSeparator is on, the original
-  // four-space gap otherwise -- a plain array-join now that order comes
-  // from an explicit list instead of a filter over this._state.
+  //
+  // Phase 2: the panel is now rendered as Pango markup (per-segment bold,
+  // per-entry font size/color) via clutter_text.set_markup(), joined with
+  // the user-selected separator (falling back to the legacy ' | '/four-
+  // space behavior when 'separator' is unset -- see
+  // _resolveSeparatorValue()). The separator itself is escaped before
+  // insertion since it is untrusted free-form text (see
+  // resolveSeparatorValue()'s doc comment in separators.js). If the
+  // assembled markup ever fails to parse, this falls back to the
+  // equivalent plain text via `.text` rather than breaking the panel.
+  //
+  // NOTE: this only affects the panel label. The 'full' form used by menu
+  // rows (_updateTimeLabels()/item.label) and the drag-actor preview
+  // continue to go through _getLabelForTimezone(), which always returns
+  // plain text (see its own comment) -- they render via St.Label.text,
+  // which would show raw markup syntax literally if given markup.
   _updateLabel() {
-    let texts = this._activeOrder
+    let zones = this._activeOrder
       .map((zone) => this._stateByZone.get(zone))
-      .filter((item) => item !== undefined)
-      .map((item) => this._getLabelForTimezone({ item: item }));
+      .filter((item) => item !== undefined);
 
-    let separator = this._config.showSeparator ? ' | ' : '    ';
-    this._label.text = texts.length > 0 ? texts.join(separator) : '...';
+    if (zones.length === 0) {
+      this._setPanelText('...');
+      return;
+    }
+
+    let separatorValue = this._resolveSeparatorValue();
+    let escapedSeparator = escapeMarkup(separatorValue);
+    let markup = zones.map((item) => this._getMarkupForTimezone(item)).join(escapedSeparator);
+
+    try {
+      this._label.clutter_text.set_markup(markup);
+    } catch (e) {
+      // Belt-and-suspenders: every dynamic piece of this markup is built
+      // through escapeMarkup()/sanitizeColor()/sanitizeFontSize(), so this
+      // should be unreachable in practice, but a parse failure here must
+      // never leave the panel clock broken/blank.
+      console.error(
+        `${this.metadata?.name ?? 'Timezones extension'}: failed to render panel markup, falling back to plain text`,
+        e
+      );
+      let plainText = zones.map((item) => this._getLabelForTimezone({ item })).join(separatorValue);
+      this._setPanelText(plainText);
+    }
   }
 
+  // Sets the panel label to plain, non-markup text. Used both for the
+  // empty-state '...' text and as the fallback if markup rendering fails.
+  // Setting `.text` (rather than leaving stale markup in place) also
+  // resets ClutterText's use-markup state back to plain text.
+  _setPanelText(text) {
+    this._label.text = text;
+  }
+
+  // Resolves the effective separator STRING to join panel entries with:
+  // the curated/literal value from the 'separator' GSettings key when
+  // set, otherwise the legacy behavior (this._config.showSeparator ? ' | '
+  // : '    ') for exact backward compatibility with existing users who
+  // have never touched the new key (its default is '').
+  _resolveSeparatorValue() {
+    let resolved = resolveSeparatorValue(this._separatorId);
+    if (resolved !== null) {
+      return resolved;
+    }
+    return this._config.showSeparator ? ' | ' : '    ';
+  }
+
+  // Effective formatting for `zone`: a per-entry override (this._formatting)
+  // takes priority over the global default (this._formattingDefaults),
+  // which itself defaults to DEFAULT_FORMATTING (see _loadSettings()).
+  // Both this._formatting[zone] and this._formattingDefaults are always
+  // already-normalized (parseFormatting()) full formatting objects, so no
+  // per-field merge happens here -- an entry with a partial override
+  // still gets DEFAULT_FORMATTING's neutral values for its other fields,
+  // matching the 'formatting' schema key's documented shape.
+  _getEffectiveFormatting(zone) {
+    if (this._formatting && Object.prototype.hasOwnProperty.call(this._formatting, zone)) {
+      return this._formatting[zone];
+    }
+    return this._formattingDefaults || DEFAULT_FORMATTING;
+  }
+
+  // Computes the three raw (unescaped, unformatted) segments -- city/
+  // alias label, zone abbreviation (or null when hidden), and time --
+  // shared by both the plain-text and markup renderers below. This is
+  // the exact same decision logic the pre-Phase-2 single function used;
+  // it has just been split from the "how to render the segments" step so
+  // that step can be swapped independently (buildEntryText/buildEntryMarkup
+  // in formatting.js).
+  //
   // `nameOverride`, when given, is a matched search-result alias display
   // name (Feature A) and takes priority over any stored per-zone label
-  // (Feature B) for the row's name segment -- this is the single place
-  // that formats "Name (zone/id)", reused by both features instead of
-  // duplicating the format logic at each call site.
-  _getLabelForTimezone({ item, full, nameOverride }) {
+  // (Feature B) for the city segment -- this is the single place that
+  // decides "Name (zone/id)" vs plain city name, reused by both features
+  // instead of duplicating the format logic at each call site.
+  _computeEntrySegments({ item, full, nameOverride }) {
     let glibTimezone = GLib.TimeZone.new(item.timezone);
     let now = GLib.DateTime.new_now(glibTimezone);
     let alias = nameOverride || (this._labels ? this._labels[item.timezone] : undefined);
@@ -562,8 +681,32 @@ export default class TimezonesExtension extends Extension {
       timezoneLabel = this._config.showCity ? alias || item.timezone.split('/').pop().replace('_', ' ') : '';
     }
 
-    let offset = full || this._config.showTimezone ? ` ${now.format('%Z')} ` : ' ';
-    return `${timezoneLabel}${offset}${now.format(this._config.format24 ? '%R' : '%l:%M %p')}`;
+    let showZone = full || this._config.showTimezone;
+    return {
+      city: timezoneLabel,
+      zone: showZone ? now.format('%Z') : null,
+      time: now.format(this._config.format24 ? '%R' : '%l:%M %p')
+    };
+  }
+
+  // Plain-text (never markup) form of an entry -- used for the 'full' form
+  // consumed by menu rows (_updateTimeLabels()'s item.label, rendered via
+  // plain St.Label.text) and the drag-actor preview, AND as the panel's
+  // fallback text if markup rendering ever fails (_updateLabel()). Byte-
+  // identical to the pre-Phase-2 output for the same inputs.
+  _getLabelForTimezone({ item, full, nameOverride }) {
+    let segments = this._computeEntrySegments({ item, full, nameOverride });
+    return buildEntryText(segments);
+  }
+
+  // Pango-markup form of a single panel entry: per-segment bold and
+  // per-entry font size/color from the effective formatting for `item`'s
+  // zone. Only ever used for the panel (_updateLabel()); menu rows always
+  // use the plain-text form above.
+  _getMarkupForTimezone(item) {
+    let segments = this._computeEntrySegments({ item, full: false });
+    let fmt = this._getEffectiveFormatting(item.timezone);
+    return buildEntryMarkup(segments, fmt);
   }
 
   _updateMenu() {

@@ -17,9 +17,16 @@ import {
   parseFormatting,
   serializeFormatting,
   DEFAULT_FORMATTING,
+  buildEntryText,
+  buildEntryMarkup,
 } from '../formatting.js';
 
-import { SEPARATORS, DEFAULT_SEPARATOR_ID, getSeparatorById } from '../separators.js';
+import {
+  SEPARATORS,
+  DEFAULT_SEPARATOR_ID,
+  getSeparatorById,
+  resolveSeparatorValue,
+} from '../separators.js';
 
 let passCount = 0;
 let failCount = 0;
@@ -63,6 +70,15 @@ function assertFalse(value, msg) {
   if (value !== false) {
     throw new Error(msg || `expected false, got ${JSON.stringify(value)}`);
   }
+}
+
+// Strips every tag buildEntryMarkup() itself is allowed to emit (<b>,
+// </b>, <span ...>, </span>) from a markup string, leaving only text
+// content. Used to assert that whatever remains contains no raw '<'/'>'
+// (i.e. every '<'/'>' in the original markup was either one of these
+// builder-emitted tags or came from an already-escaped &lt;/&gt; entity).
+function stripBuilderTags(markup) {
+  return markup.replace(/<\/?b>/g, '').replace(/<span[^>]*>/g, '').replace(/<\/span>/g, '');
 }
 
 // ---------------------------------------------------------------------
@@ -234,6 +250,252 @@ test('serializeFormatting: default object round-trips to itself', () => {
   const serialized = serializeFormatting(DEFAULT_FORMATTING);
   const roundTripped = parseFormatting(serialized);
   assertEqual(roundTripped, DEFAULT_FORMATTING);
+});
+
+// ---------------------------------------------------------------------
+// buildEntryText -- legacy plain-text format, byte-identical reproduction
+// ---------------------------------------------------------------------
+
+test('buildEntryText: city+zone+time', () =>
+  assertEqual(buildEntryText({ city: 'New York', zone: 'EST', time: '3:00 PM' }), 'New York EST 3:00 PM'));
+
+test('buildEntryText: city-only+time (zone hidden -> single space)', () =>
+  assertEqual(buildEntryText({ city: 'New York', zone: null, time: '3:00 PM' }), 'New York 3:00 PM'));
+
+test('buildEntryText: no-city+time (empty city, zone hidden)', () =>
+  assertEqual(buildEntryText({ city: '', zone: null, time: '3:00 PM' }), ' 3:00 PM'));
+
+test('buildEntryText: no-city+zone+time (empty city, zone shown)', () =>
+  assertEqual(buildEntryText({ city: '', zone: 'PST', time: '3:00 PM' }), ' PST 3:00 PM'));
+
+test('buildEntryText: custom label containing spaces', () =>
+  assertEqual(
+    buildEntryText({ city: 'My Home Base', zone: 'PST', time: '11:45 AM' }),
+    'My Home Base PST 11:45 AM'
+  ));
+
+test('buildEntryText: undefined zone treated same as null (hidden)', () =>
+  assertEqual(buildEntryText({ city: 'X', zone: undefined, time: 'Y' }), 'X Y'));
+
+// ---------------------------------------------------------------------
+// buildEntryMarkup -- neutral formatting equivalence
+// ---------------------------------------------------------------------
+
+test('buildEntryMarkup: neutral formatting emits no span attributes', () => {
+  const markup = buildEntryMarkup({ city: 'Tokyo', zone: 'JST', time: '11:00 PM' }, DEFAULT_FORMATTING);
+  assertFalse(markup.includes('<span'), `unexpected <span> in neutral markup: ${markup}`);
+});
+
+test('buildEntryMarkup: neutral formatting equivalent to escaped plain text', () => {
+  const segments = { city: 'Tokyo', zone: 'JST', time: '11:00 PM' };
+  const markup = buildEntryMarkup(segments, DEFAULT_FORMATTING);
+  const expected = escapeMarkup(buildEntryText(segments));
+  assertEqual(markup, expected);
+});
+
+test('buildEntryMarkup: default fmt argument (undefined) behaves like DEFAULT_FORMATTING', () => {
+  const segments = { city: 'Tokyo', zone: 'JST', time: '11:00 PM' };
+  assertEqual(buildEntryMarkup(segments, undefined), buildEntryMarkup(segments, DEFAULT_FORMATTING));
+});
+
+test('buildEntryMarkup: zone hidden (null) matches buildEntryText spacing', () => {
+  const segments = { city: 'Tokyo', zone: null, time: '11:00 PM' };
+  assertEqual(buildEntryMarkup(segments, DEFAULT_FORMATTING), escapeMarkup(buildEntryText(segments)));
+});
+
+// ---------------------------------------------------------------------
+// buildEntryMarkup -- independent per-segment bold
+// ---------------------------------------------------------------------
+
+test('buildEntryMarkup: boldCity bolds only the city segment', () => {
+  const markup = buildEntryMarkup(
+    { city: 'City', zone: 'Zone', time: 'Time' },
+    { ...DEFAULT_FORMATTING, boldCity: true }
+  );
+  assertTrue(markup.includes('<b>City</b>'), markup);
+  assertFalse(markup.includes('<b>Zone</b>'), markup);
+  assertFalse(markup.includes('<b>Time</b>'), markup);
+});
+
+test('buildEntryMarkup: boldTime bolds only the time segment', () => {
+  const markup = buildEntryMarkup(
+    { city: 'City', zone: 'Zone', time: 'Time' },
+    { ...DEFAULT_FORMATTING, boldTime: true }
+  );
+  assertTrue(markup.includes('<b>Time</b>'), markup);
+  assertFalse(markup.includes('<b>City</b>'), markup);
+  assertFalse(markup.includes('<b>Zone</b>'), markup);
+});
+
+test('buildEntryMarkup: boldZone bolds only the zone segment', () => {
+  const markup = buildEntryMarkup(
+    { city: 'City', zone: 'Zone', time: 'Time' },
+    { ...DEFAULT_FORMATTING, boldZone: true }
+  );
+  assertTrue(markup.includes('<b>Zone</b>'), markup);
+  assertFalse(markup.includes('<b>City</b>'), markup);
+  assertFalse(markup.includes('<b>Time</b>'), markup);
+});
+
+test('buildEntryMarkup: all three bold flags bold all three segments independently', () => {
+  const markup = buildEntryMarkup(
+    { city: 'City', zone: 'Zone', time: 'Time' },
+    { ...DEFAULT_FORMATTING, boldCity: true, boldTime: true, boldZone: true }
+  );
+  assertTrue(markup.includes('<b>City</b>'), markup);
+  assertTrue(markup.includes('<b>Zone</b>'), markup);
+  assertTrue(markup.includes('<b>Time</b>'), markup);
+});
+
+test('buildEntryMarkup: bold flags with zone hidden only bold city/time', () => {
+  const markup = buildEntryMarkup(
+    { city: 'City', zone: null, time: 'Time' },
+    { ...DEFAULT_FORMATTING, boldCity: true, boldTime: true }
+  );
+  assertEqual(markup, '<b>City</b> <b>Time</b>');
+});
+
+// ---------------------------------------------------------------------
+// buildEntryMarkup -- size/color attributes
+// ---------------------------------------------------------------------
+
+test('buildEntryMarkup: size attribute uses 1024x scaling', () => {
+  const markup = buildEntryMarkup({ city: 'C', zone: null, time: 'T' }, { ...DEFAULT_FORMATTING, size: 14 });
+  assertTrue(markup.includes('size="14336"'), markup);
+});
+
+test('buildEntryMarkup: size 0 (inherit) emits no size attribute', () => {
+  const markup = buildEntryMarkup({ city: 'C', zone: null, time: 'T' }, { ...DEFAULT_FORMATTING, size: 0 });
+  assertFalse(markup.includes('size='), markup);
+});
+
+test('buildEntryMarkup: color attribute is well-formed', () => {
+  const markup = buildEntryMarkup({ city: 'C', zone: null, time: 'T' }, { ...DEFAULT_FORMATTING, color: '#ff0000' });
+  assertTrue(markup.includes('foreground="#ff0000"'), markup);
+});
+
+test('buildEntryMarkup: empty color emits no foreground attribute', () => {
+  const markup = buildEntryMarkup({ city: 'C', zone: null, time: 'T' }, { ...DEFAULT_FORMATTING, color: '' });
+  assertFalse(markup.includes('foreground='), markup);
+});
+
+test('buildEntryMarkup: size+color together produce one well-formed <span>', () => {
+  const markup = buildEntryMarkup(
+    { city: 'C', zone: null, time: 'T' },
+    { ...DEFAULT_FORMATTING, size: 20, color: '#00ff00' }
+  );
+  assertTrue(/^<span size="20480" foreground="#00ff00">.*<\/span>$/.test(markup), markup);
+});
+
+// ---------------------------------------------------------------------
+// buildEntryMarkup -- injection / escaping (security-critical)
+// ---------------------------------------------------------------------
+
+const injectionLabels = [
+  '<b>evil</b>',
+  'Fish & Chips',
+  'She said "hi"',
+  "It's a trap",
+  '<span foreground="red">gotcha</span>',
+];
+
+for (const label of injectionLabels) {
+  test(`buildEntryMarkup: city injection case is fully escaped: ${JSON.stringify(label)}`, () => {
+    const markup = buildEntryMarkup({ city: label, zone: 'UTC', time: '12:00' }, DEFAULT_FORMATTING);
+    const stripped = stripBuilderTags(markup);
+    assertFalse(/[<>]/.test(stripped), `unescaped angle bracket survived in: ${markup}`);
+    assertTrue(markup.includes(escapeMarkup(label)), `escaped payload not found in: ${markup}`);
+  });
+
+  test(`buildEntryMarkup: zone injection case is fully escaped: ${JSON.stringify(label)}`, () => {
+    const markup = buildEntryMarkup({ city: 'City', zone: label, time: '12:00' }, DEFAULT_FORMATTING);
+    const stripped = stripBuilderTags(markup);
+    assertFalse(/[<>]/.test(stripped), `unescaped angle bracket survived in: ${markup}`);
+  });
+
+  test(`buildEntryMarkup: time injection case is fully escaped: ${JSON.stringify(label)}`, () => {
+    const markup = buildEntryMarkup({ city: 'City', zone: 'UTC', time: label }, DEFAULT_FORMATTING);
+    const stripped = stripBuilderTags(markup);
+    assertFalse(/[<>]/.test(stripped), `unescaped angle bracket survived in: ${markup}`);
+  });
+}
+
+test('buildEntryMarkup: injection case escaped even when that segment is bolded', () => {
+  const markup = buildEntryMarkup({ city: '<b>evil</b>', zone: 'UTC', time: '12:00' }, {
+    ...DEFAULT_FORMATTING,
+    boldCity: true,
+  });
+  assertEqual(markup, '<b>&lt;b&gt;evil&lt;/b&gt;</b> UTC 12:00');
+  const stripped = stripBuilderTags(markup);
+  assertFalse(/[<>]/.test(stripped), markup);
+});
+
+test('buildEntryMarkup: malicious formatting blob (parseFormatting) produces safe attributes', () => {
+  const blob = JSON.stringify({
+    size: 'DROP TABLE',
+    color: '#fff" foreground="red',
+    boldCity: true,
+    boldTime: 'yes',
+    boldZone: 1,
+  });
+  const fmt = parseFormatting(blob);
+  const markup = buildEntryMarkup({ city: 'A', zone: 'Z', time: 'T' }, fmt);
+
+  // size was garbage -> sanitizes to 0 -> no size attribute at all.
+  assertFalse(markup.includes('size='), markup);
+  // color had a quote-injection attempt -> sanitizes to '' -> no foreground
+  // attribute, and critically no stray '" foreground="red' text anywhere.
+  assertFalse(markup.includes('foreground='), markup);
+  assertFalse(markup.includes('red'), markup);
+  // boldCity was a real `true` -> still honored.
+  assertTrue(markup.includes('<b>A</b>'), markup);
+  // boldTime/boldZone were non-boolean truthy values -> sanitizeBool()
+  // rejects anything that isn't literally `true`, so neither bolds.
+  assertFalse(markup.includes('<b>T</b>'), markup);
+  assertFalse(markup.includes('<b>Z</b>'), markup);
+});
+
+test('buildEntryMarkup: absurd size from malicious blob clamps into a well-formed attribute', () => {
+  const fmt = parseFormatting(JSON.stringify({ size: 999999 }));
+  const markup = buildEntryMarkup({ city: 'A', zone: null, time: 'T' }, fmt);
+  // sanitizeFontSize clamps to MAX_FONT_SIZE (32) -> 32 * 1024 = 32768.
+  assertTrue(markup.includes('size="32768"'), markup);
+});
+
+// ---------------------------------------------------------------------
+// resolveSeparatorValue
+// ---------------------------------------------------------------------
+
+test('resolveSeparatorValue: curated id resolves to its curated value', () => {
+  assertEqual(resolveSeparatorValue('pipe'), getSeparatorById('pipe').value);
+});
+
+test('resolveSeparatorValue: empty string means "no override" (null)', () => {
+  assertEqual(resolveSeparatorValue(''), null);
+});
+
+test('resolveSeparatorValue: non-string means "no override" (null)', () => {
+  assertEqual(resolveSeparatorValue(undefined), null);
+  assertEqual(resolveSeparatorValue(null), null);
+  assertEqual(resolveSeparatorValue(42), null);
+});
+
+test('resolveSeparatorValue: unrecognized literal is returned as-is when short', () => {
+  assertEqual(resolveSeparatorValue('~~~'), '~~~');
+});
+
+test('resolveSeparatorValue: unrecognized literal is capped at 32 characters', () => {
+  const long = 'x'.repeat(100);
+  const result = resolveSeparatorValue(long);
+  assertTrue(result.length <= 32, `length ${result.length} exceeds cap`);
+  assertEqual(result, long.slice(0, 32));
+});
+
+test('resolveSeparatorValue: malicious literal separator is safely neutralized once escaped', () => {
+  const malicious = '<span foreground="red">';
+  const resolved = resolveSeparatorValue(malicious);
+  const escaped = escapeMarkup(resolved);
+  assertFalse(/[<>]/.test(escaped), `unescaped angle bracket in ${escaped}`);
 });
 
 // ---------------------------------------------------------------------
