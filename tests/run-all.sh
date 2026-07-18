@@ -22,6 +22,18 @@
 # invoking this script -- it is a normal environment variable, so it is
 # inherited by the gjs child process below with no extra plumbing
 # needed. Not set here by default.
+#
+# A third suite, tests/run-shell-tests.sh, runs after both of the above: a
+# GJS-level driver (tests/shell-driver/) that launches a real, isolated
+# headless gnome-shell and drives the REAL extension.js's panel rendering,
+# popup menu separator/formatting-default controls, drag-and-drop reorder
+# logic, inline rename commit/cancel, and disable()/teardown signal-leak
+# behavior directly -- see tests/shell-driver/extension.js and this
+# project's tests/README.md for exactly what it covers and why. Same
+# SKIP=FAIL discipline, with its own opt-out: TZSHELL_ALLOW_SKIP=1 (only
+# for "gnome-shell is not installed in this environment at all" -- every
+# other failure mode, including a timeout waiting for results, is a real
+# failure regardless of that variable).
 set -u
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
@@ -47,12 +59,23 @@ if [ "$prefs_status" -ne 0 ]; then
 fi
 
 echo ""
+echo "==> tests/run-shell-tests.sh (real gnome-shell driver, isolated sandbox)"
+if [ "${TZSHELL_ALLOW_SKIP:-0}" = "1" ]; then
+  echo "    (TZSHELL_ALLOW_SKIP=1 is set: a 'gnome-shell not installed' skip here will exit 0)"
+fi
+bash tests/run-shell-tests.sh
+shell_status=$?
+if [ "$shell_status" -ne 0 ]; then
+  status=1
+fi
+
+echo ""
 if [ "$status" -eq 0 ]; then
-  echo "run-all.sh: both suites passed (exit 0)."
+  echo "run-all.sh: all three suites passed (exit 0)."
 else
-  echo "run-all.sh: FAILED (pure exit=$pure_status, prefs exit=$prefs_status)."
-  echo "A non-zero prefs exit includes the case where it was SKIPPED -- see its banner above."
-  echo "If that skip is expected in this environment, re-run with TZPREFS_ALLOW_SKIP=1."
+  echo "run-all.sh: FAILED (pure exit=$pure_status, prefs exit=$prefs_status, shell exit=$shell_status)."
+  echo "A non-zero prefs/shell exit includes the case where it was SKIPPED -- see its banner above."
+  echo "If that skip is expected in this environment, re-run with TZPREFS_ALLOW_SKIP=1 and/or TZSHELL_ALLOW_SKIP=1."
 fi
 
 exit "$status"

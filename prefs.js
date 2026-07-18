@@ -66,6 +66,12 @@ import {
   rgbaToHex,
 } from './formatting.js';
 import { SEPARATORS, DEFAULT_SEPARATOR_ID, getSeparatorById } from './separators.js';
+import timezones from './timezones.js';
+
+// Known-zone lookup, mirroring extension.js's own defensive filtering of
+// dconf-sourced zone lists (see _loadSettings()'s "stale/foreign dconf
+// entry" comments and _reconcileActiveOrder()). Built once at module load.
+const KNOWN_ZONES = new Set(timezones);
 
 const MIN_FONT_SIZE = 6;
 const MAX_FONT_SIZE = 32;
@@ -255,7 +261,18 @@ export default class TimezonesPrefs extends ExtensionPreferences {
     // `this._activeOrder` is loaded from (see its `_loadSettings()`); this
     // process has no access to that in-memory state, so it is re-read
     // directly from GSettings here.
-    const activeZones = settings.get_strv('timezones');
+    //
+    // Filtered against KNOWN_ZONES before use, mirroring extension.js's
+    // own convention of dropping unknown/stale dconf zone entries (see
+    // "stale/foreign dconf entry" in _loadSettings()) rather than trusting
+    // them. This matters here specifically because each zone id becomes an
+    // Adw.ExpanderRow.title below, and libadwaita interprets row titles as
+    // Pango markup -- a hand-edited/tampered dconf 'timezones' entry could
+    // otherwise inject markup or produce a Gtk-WARNING from malformed
+    // markup. Known zone ids are plain ASCII (letters/digits/'/'/'_'/'+'/
+    // '-'), so filtering to KNOWN_ZONES is sufficient on its own (no
+    // separate escaping needed for the title, unlike free-form user text).
+    const activeZones = settings.get_strv('timezones').filter((zone) => KNOWN_ZONES.has(zone));
 
     if (activeZones.length === 0) {
       const emptyRow = new Adw.ActionRow({

@@ -3,6 +3,7 @@
 import GLib from 'gi://GLib';
 import St from 'gi://St';
 import Clutter from 'gi://Clutter';
+import Pango from 'gi://Pango';
 import GnomeDesktop from 'gi://GnomeDesktop?version=4.0';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -31,6 +32,12 @@ import { FONT_SIZE_PRESETS, COLOR_PALETTE, resolvePresetId } from './formattingP
 // Anything else present in the 'config' GSettings value (e.g. from a
 // tampered/foreign dconf entry) is ignored rather than blindly copied.
 const CONFIG_KEYS = ['format24', 'showCity', 'showTimezone', 'hideSystemClock', 'showSeparator'];
+
+// Minimum gap between consecutive console.error() calls logging a panel
+// markup parse failure (see _logMarkupFailureThrottled()). _updateLabel()
+// runs on every clock tick, so this bounds journal spam if that
+// should-be-unreachable branch is ever hit continuously.
+const MARKUP_FAILURE_LOG_INTERVAL_SECONDS = 300;
 
 // Maximum length of a user-supplied per-zone display label (Feature B).
 // Long enough for short custom names ("Home", "Mom's house") while keeping
@@ -946,8 +953,25 @@ export default class TimezonesExtension extends Extension {
   // _resolveSeparatorValue()). The separator itself is escaped before
   // insertion since it is untrusted free-form text (see
   // resolveSeparatorValue()'s doc comment in separators.js). If the
-  // assembled markup ever fails to parse, this falls back to the
-  // equivalent plain text via `.text` rather than breaking the panel.
+  // assembled markup is ever invalid, this falls back to the equivalent
+  // plain text via `.text` rather than breaking the panel.
+  //
+  // Phase 5 FIX (karen gate finding 1b): ClutterText.set_markup() does NOT
+  // raise a JS-catchable exception on a Pango parse failure -- it fails
+  // silently (a `Clutter-WARNING **: Failed to set the markup` on stderr
+  // only) and leaves the label showing whatever it showed before, or
+  // nothing. The `try { set_markup() } catch` below this comment used to
+  // be the ONLY guard against a broken/blank panel, which made it
+  // effectively dead code: nothing it could ever catch would actually be
+  // thrown. The real validation now happens BEFORE set_markup() is ever
+  // called, via _isMarkupValid() (an independent Pango.parse_markup()
+  // oracle -- the same check tests/run-tests.js's pure suite and
+  // tests/shell-driver/extension.js both use), so an invalid markup
+  // string takes the plain-text fallback path unconditionally instead of
+  // silently rendering as empty/stale. The try/catch around set_markup()
+  // itself is kept as a second, defense-in-depth layer for any other
+  // (non-parse) exception set_markup() might someday raise -- it is not
+  // relied upon as the primary safety net any more.
   //
   // NOTE: this only affects the panel label. The 'full' form used by menu
   // rows (_updateTimeLabels()/item.label) and the drag-actor preview
@@ -967,21 +991,74 @@ export default class TimezonesExtension extends Extension {
     let separatorValue = this._resolveSeparatorValue();
     let escapedSeparator = escapeMarkup(separatorValue);
     let markup = zones.map((item) => this._getMarkupForTimezone(item)).join(escapedSeparator);
+    let plainText = () => zones.map((item) => this._getLabelForTimezone({ item })).join(separatorValue);
+
+    let validation = this._checkMarkupValid(markup);
+    if (!validation.ok) {
+      this._logMarkupFailureThrottled(validation.error);
+      this._setPanelText(plainText());
+      return;
+    }
 
     try {
       this._label.clutter_text.set_markup(markup);
     } catch (e) {
-      // Belt-and-suspenders: every dynamic piece of this markup is built
-      // through escapeMarkup()/sanitizeColor()/sanitizeFontSize(), so this
-      // should be unreachable in practice, but a parse failure here must
-      // never leave the panel clock broken/blank.
-      console.error(
-        `${this.metadata?.name ?? 'Timezones extension'}: failed to render panel markup, falling back to plain text`,
-        e
-      );
-      let plainText = zones.map((item) => this._getLabelForTimezone({ item })).join(separatorValue);
-      this._setPanelText(plainText);
+      // Defense-in-depth only -- see the Phase 5 comment above. Every
+      // dynamic piece of this markup is built through
+      // escapeMarkup()/sanitizeColor()/sanitizeFontSize() AND has already
+      // passed the _checkMarkupValid() pre-check above, so reaching this
+      // catch block at all should be unreachable in practice; if it is
+      // ever reached, the plain-text fallback below still applies so the
+      // panel is never left broken/blank.
+      this._logMarkupFailureThrottled(e);
+      this._setPanelText(plainText());
     }
+  }
+
+  // Independent validation oracle for an assembled Pango markup string,
+  // used BEFORE set_markup() is ever called (see the Phase 5 comment on
+  // _updateLabel() for why set_markup()'s own failure mode cannot be
+  // trusted as a safety net). Runs the exact same real Pango parser
+  // set_markup() itself would use, but in a form that DOES raise a
+  // JS-catchable exception (Pango.parse_markup() throws a GLib.MarkupError
+  // GError on invalid markup, unlike ClutterText.set_markup()). Returns
+  // `{ ok: true }` on success or `{ ok: false, error }` on failure --
+  // never throws itself.
+  _checkMarkupValid(markup) {
+    try {
+      // The third argument is the accelerator marker character (as a
+      // single-character string, or '' for "no accelerator parsing" --
+      // this extension's markup never uses one).
+      Pango.parse_markup(markup, -1, '');
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: e };
+    }
+  }
+
+  // Logs the first panel-markup-parse failure immediately, then at most
+  // once per MARKUP_FAILURE_LOG_INTERVAL_SECONDS thereafter, regardless of
+  // how many ticks hit the catch block in between. _updateLabel() runs on
+  // every clock tick (see the WallClock 'notify::clock' handler in
+  // enable()), so an unthrottled console.error() here would spam the
+  // journal once per tick indefinitely if this branch were ever reached
+  // continuously (e.g. by a future GLib/Pango behavior change) -- this
+  // bounds that to a manageable rate without silencing the condition
+  // entirely (each occurrence still degrades to the plain-text fallback
+  // above, unthrottled; only the logging is rate-limited).
+  _logMarkupFailureThrottled(e) {
+    let now = GLib.DateTime.new_now_local().to_unix();
+    if (
+      this._lastMarkupFailureLogTime !== undefined &&
+      now - this._lastMarkupFailureLogTime < MARKUP_FAILURE_LOG_INTERVAL_SECONDS
+    ) {
+      return;
+    }
+    this._lastMarkupFailureLogTime = now;
+    console.error(
+      `${this.metadata?.name ?? 'Timezones extension'}: failed to render panel markup, falling back to plain text`,
+      e
+    );
   }
 
   // Sets the panel label to plain, non-markup text. Used both for the

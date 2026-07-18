@@ -189,11 +189,35 @@ try {
   // The GResource keeps its data mapped in memory once registered, so the
   // backing temp file/directory is safe to remove immediately rather than
   // leaking a fresh throwaway directory into /tmp on every test run.
-  try {
-    GLib.unlink(gresourcePath);
-    GLib.rmdir(tmpDir);
-  } catch (cleanupError) {
-    // Non-fatal: a leftover empty temp dir is not a test failure.
+  //
+  // GLib.unlink()/GLib.rmdir() return a plain integer (0 on success,
+  // non-zero on failure) rather than throwing on failure -- a prior
+  // version of this cleanup only wrapped these in try/catch, which never
+  // actually caught anything, since a non-zero return isn't a thrown
+  // exception. That let ~9 stale empty tzprefs-shim-* directories
+  // accumulate under /tmp across a session: GLib.rmdir() likely raced the
+  // GResource mmap of the just-unlinked backing file on some runs (the
+  // directory entry is gone, but the containing directory can still
+  // transiently report non-empty/busy immediately after), and the failure
+  // was silently swallowed instead of retried. Retrying rmdir a few times
+  // with a short backoff (checking its actual return value) is
+  // "make cleanup robust" without deferring the rmdir indefinitely or
+  // reusing a single directory across runs -- either of which would be a
+  // bigger structural change than this leak warrants.
+  GLib.unlink(gresourcePath);
+  let rmdirResult = -1;
+  for (let attempt = 0; attempt < 5 && rmdirResult !== 0; attempt += 1) {
+    if (attempt > 0) {
+      GLib.usleep(20 * 1000); // 20ms backoff between retries.
+    }
+    rmdirResult = GLib.rmdir(tmpDir);
+  }
+  if (rmdirResult !== 0) {
+    // Still non-fatal (a leftover empty temp dir is not a test failure),
+    // but no longer silent -- if this ever fires it is a visible signal
+    // that the retry budget above needs revisiting, not another silent
+    // leak.
+    print(`(cleanup warning: could not remove temp dir ${tmpDir} after retries -- non-fatal, suite continues)`);
   }
 }
 
@@ -532,6 +556,53 @@ const KNOWN_ZONES = ['UTC', 'America/Los_Angeles'];
     assertEqual(utcBoldCity.active, currentDefaults.boldCity, 'UTC boldCity widget should display the current global default after clearing');
     assertEqual(utcBoldTime.active, currentDefaults.boldTime, 'UTC boldTime widget should display the current global default (true) after clearing');
     assertEqual(utcBoldZone.active, currentDefaults.boldZone, 'UTC boldZone widget should display the current global default after clearing');
+  });
+}
+
+// =====================================================================
+// Suite 3: unknown/foreign zone ids in the 'timezones' key are dropped
+// from the per-zone formatting UI, mirroring extension.js's own
+// "stale/foreign dconf entry" filtering (see _loadSettings()). A
+// hand-edited/tampered dconf 'timezones' value containing an id this
+// extension doesn't recognize (e.g. a markup payload, or simply a typo'd
+// zone) must not produce an Adw.ExpanderRow at all -- in particular, it
+// must never reach Adw.ExpanderRow.title, which libadwaita interprets as
+// Pango markup.
+// =====================================================================
+
+{
+  const settings = newSettings();
+  const hostileZone = '<b>evil</b>';
+  settings.set_strv('timezones', ['UTC', hostileZone, 'Not/AZone']);
+
+  const prefsObj = new TimezonesPrefs();
+  prefsObj.getSettings = () => settings;
+  const window = new Adw.PreferencesWindow();
+
+  test('fillPreferencesWindow() does not throw when the timezones key contains unknown/hostile entries', () => {
+    prefsObj.fillPreferencesWindow(window);
+  });
+
+  test('an unknown/hostile zone id produces no expander widget at all', () => {
+    const widget = findByName(window, `tzprefs-expander-${zoneToWidgetId(hostileZone)}`);
+    assertTrue(widget === null, 'hostile zone must not get an expander row');
+  });
+
+  test('an unrecognized-but-benign-looking zone id ("Not/AZone") also produces no expander widget', () => {
+    const widget = findByName(window, `tzprefs-expander-${zoneToWidgetId('Not/AZone')}`);
+    assertTrue(widget === null, 'unknown zone must not get an expander row');
+  });
+
+  test('the known zone (UTC) still gets its expander even when other timezones entries are unknown', () => {
+    const widget = findByName(window, 'tzprefs-expander-UTC');
+    assertTrue(widget !== null, 'UTC expander should still be built');
+  });
+
+  test('only the known-zone widget names are present -- unknown entries contribute nothing to the widget tree', () => {
+    const names = [];
+    collectNamedWidgets(window, names);
+    names.sort();
+    assertEqual(names, expectedWidgetNamesFor(['UTC']));
   });
 }
 

@@ -1,0 +1,8 @@
+{
+  "_generated": "Hand-written test infrastructure, not a real user-facing extension.",
+  "description": "GJS-level shell driver for gnome-timezones-extension's tests/run-shell-tests.sh. Enables the real target extension inside a nested/headless gnome-shell, drives its real methods directly, writes machine-readable results to TZSHELL_RESULT_PATH, then lets run-shell-tests.sh tear the sandbox down. Never installed anywhere outside a throwaway sandbox created by run-shell-tests.sh -- not meant to be enabled in a real session.",
+  "name": "Timezones extension shell test driver",
+  "shell-version": ["45", "46", "47"],
+  "uuid": "shell-driver@tests.local",
+  "version": 1
+}

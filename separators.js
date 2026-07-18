@@ -51,8 +51,16 @@ export function getSeparatorById(id) {
 // resolved from the free-form 'separator' GSettings key. That key is
 // type `s` with no schema-level constraint to the curated list above --
 // any process with dconf access can write an arbitrary string into it.
-// This bounds how much text a single hand-edited/tampered value can
-// inject between every panel/menu entry.
+// This bounds how much RAW text a single hand-edited/tampered value can
+// inject between every panel/menu entry -- the cap is applied here, to the
+// raw value, BEFORE the caller escapes it via escapeMarkup() (this
+// function does not escape; see its own doc comment). escapeMarkup() can
+// expand any individual character up to 6x (e.g. '"' -> '&quot;'), so the
+// FINAL escaped separator actually inserted into markup is bounded at
+// roughly 6x this constant (~192 characters as of this writing), not at
+// MAX_LITERAL_SEPARATOR_LENGTH itself. That larger bound is still real and
+// intentional (unbounded growth is what this guards against); this
+// comment exists only so the two numbers are not confused.
 const MAX_LITERAL_SEPARATOR_LENGTH = 32;
 
 /**
