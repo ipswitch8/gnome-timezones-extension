@@ -390,6 +390,24 @@ fi
 # format every one of GLib's/GJS's/gnome-shell's own CRITICAL-level
 # messages uses), not just the two hardcoded domains from before.
 #
+# karen-gate finding (3rd round, fixed here): the Clutter-WARNING match
+# above was STILL narrowed to one specific message
+# ("Failed to set the markup"), not the `Clutter-WARNING **:` prefix
+# itself -- a THIRD scope hole (after the path-filter and the missing
+# `*-CRITICAL` class) that this project's own history had already twice
+# warned was the exact failure mode to expect from narrow log patterns.
+# Proven the hard way: a colour-probe actor added to the panel button
+# without a valid allocation produced a real, repeating
+# `Clutter-WARNING **: Can't update stage views actor unnamed [StLabel]
+# is on because it needs an allocation.` on every run -- matching none of
+# the three patterns above -- so the suite reported "47/47, clean shell
+# log" while shipping a build that spammed the journal on every install.
+# FIX: match any `Clutter-WARNING **:` line, not one specific message
+# text. If this EVER surfaces a genuinely benign, unavoidable ambient
+# warning, allowlist THAT one by its own exact signature, with a
+# reproduction actually run and recorded here -- do not narrow this
+# pattern back down to fix a false positive.
+#
 # ALLOWLIST (narrow, by exact signature -- NOT a loosened pattern): this
 # suite's own "panel: an invalid-markup case..." and "panel:
 # _logMarkupFailureThrottled()..." tests in tests/shell-driver/
@@ -437,7 +455,7 @@ LOG_HITS="$SANDBOX/log-hits.txt"
 : >"$LOG_HITS"
 grep -nE 'JS (ERROR|WARNING)' "$SHELL_LOG" >>"$LOG_HITS" 2>/dev/null || true
 grep -nE -- '-CRITICAL \*\*:' "$SHELL_LOG" >>"$LOG_HITS" 2>/dev/null || true
-grep -nE 'Clutter-WARNING \*\*:.*Failed to set the markup' "$SHELL_LOG" >>"$LOG_HITS" 2>/dev/null || true
+grep -nE -- 'Clutter-WARNING \*\*:' "$SHELL_LOG" >>"$LOG_HITS" 2>/dev/null || true
 
 # Narrow, exact-signature allowlist -- see comment above. Applied as a
 # separate filtering pass over the collected hits, not folded into the

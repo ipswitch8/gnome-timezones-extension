@@ -19,6 +19,7 @@ import {
   escapeMarkup,
   parseFormatting,
   sanitizeFormatting,
+  sanitizeColor,
   serializeFormatting,
   DEFAULT_FORMATTING,
   buildEntryText,
@@ -226,6 +227,84 @@ export default class TimezonesExtension extends Extension {
     this._button = button;
     this._label = label;
 
+    // karen-gate FIX (round 1: the first-entry-colour fix poisoned
+    // itself on the very next tick): _resolveThemeForegroundColorHex()
+    // used to read this._label's OWN theme node WHILE an inline colour
+    // override from a PREVIOUS _updateLabel() call was still applied to
+    // it. St gives an inline style the highest cascade priority, so on
+    // the tick AFTER the first entry got a colour, "the theme default"
+    // resolved to that colour instead of the real ambient one, and every
+    // colourless entry then inherited it -- no theme change or settings
+    // change required, an ordinary WallClock tick was enough (confirmed
+    // live in the karen-gate sandbox: baseline correct, very next
+    // _updateLabel() leaks).
+    //
+    // karen-gate FIX (round 2: a dedicated colour-probe actor was the
+    // new bug): sampling the ambient colour from a separate extra
+    // St.Label child of this._button hit a different real bug --
+    // PanelMenu.Button uses Clutter.FixedLayout, which cannot allocate a
+    // child that is never given an explicit position/size. That
+    // unpositioned probe measured with a real NaN allocation box and
+    // spammed a real, repeating `Clutter-WARNING **: Can't update stage
+    // views ... needs an allocation` into the shell log on every run.
+    //
+    // karen-gate FIX (round 3: this._button is not a valid stand-in for
+    // "what this._label would render"): round 2's replacement -- reading
+    // this._button's OWN theme node instead of a probe actor -- assumed
+    // style changes propagating from a common ancestor down to both
+    // this._button and this._label meant they always resolve the same
+    // colour. That is true only for rules that don't distinguish them by
+    // type/class. Measured directly (see tests/shell-driver/
+    // extension.js's own "does set_style(null) immediately followed by
+    // get_theme_node()..." record): loading a real, plausible theme
+    // stylesheet with `StLabel { color: #abcdef !important; }` -- the
+    // ordinary way a theme targets indicator label text specifically --
+    // left this._button's theme node at the OLD colour
+    // (buttonAfter=#f2f2f2) while this._label's theme node correctly
+    // tracked the change (labelAfter=#abcdef). This._button and
+    // this._label are DIFFERENT widgets any type/class selector can
+    // legitimately treat differently -- there is no substitute for
+    // reading this._label ITSELF.
+    //
+    // Fix: read this._label's own theme node, but ONLY ever while its
+    // inline style is genuinely absent (round 1's mistake was reading it
+    // WHILE contaminated, not reading this._label per se).
+    // _refreshAmbientForegroundColorHex() below saves whatever inline
+    // style is currently applied, clears it, reads the now-uncontaminated
+    // theme node, then reapplies the saved style so the visible panel is
+    // never affected by this. Measured directly (same diagnostic record
+    // referenced above) that this sequencing gives the correct value
+    // with NO extra delay needed: set_style(null) immediately followed
+    // by get_theme_node().get_foreground_color() already returns the
+    // fresh, uncontaminated colour synchronously
+    // (immediatelyAfterClear=#abcdef, matching labelAfter exactly) --
+    // St's lazy theme-node recomputation happens on set_style()'s own
+    // style-changed emission, not deferred to some later idle/paint
+    // step.
+    //
+    // Never done per clock tick: _updateLabel() runs every tick, and a
+    // clear/read/reapply cycle both wastes work and is itself a style
+    // change that would otherwise re-trigger this same logic --
+    // resolved only here (once, at enable()) and from this._label's own
+    // 'style-changed' signal below (fires on a real ambient
+    // theme/stylesheet change, e.g. light/dark switch). That signal
+    // handler must NOT react to style-changed emissions caused by our
+    // OWN set_style() calls (round 1's exact self-poisoning shape, one
+    // layer up) -- guarded by this._applyingOwnLabelStyle, the same
+    // "ignore our own re-entrant emission" pattern this file already
+    // uses for this._applyingExternalSettings (see the settings
+    // 'changed' handler above/below). _setLabelStyle() is the ONLY
+    // method allowed to call this._label.set_style() anywhere in this
+    // file, specifically so that guard is never bypassed.
+    this._applyingOwnLabelStyle = false;
+    this._labelStyleChangedId = label.connect('style-changed', () => {
+      if (this._applyingOwnLabelStyle) {
+        return;
+      }
+      this._refreshAmbientForegroundColorHex();
+      this._updateLabel();
+    });
+
     this._initMenu();
     this._updateLabel();
 
@@ -290,6 +369,46 @@ export default class TimezonesExtension extends Extension {
     this._signalId = this._systemClock.connect('notify::clock', () => this._updateLabel());
 
     Main.panel.addToStatusArea(`${this.metadata.name} Indicator`, this._button, 1, 'center');
+
+    // karen-gate FIX: this._label is only genuinely staged once
+    // addToStatusArea() above actually parents this._button (and
+    // therefore this._label) into the panel -- get_theme_node() before
+    // this point returns nothing usable (see the get_stage() guard in
+    // _resolveThemeForegroundColorHex()), and St's 'style-changed'
+    // signal only fires on a subsequent INVALIDATION, never for this
+    // initial resolution (verified: st-widget.c's
+    // get_root_theme_node()/on_theme_context_changed() only calls
+    // st_widget_style_changed() in response to a REAL
+    // StThemeContext::changed, never as an announcement that a widget's
+    // very first style computation has happened) -- so without this,
+    // this._ambientForegroundColorHex would stay '' until some
+    // unrelated future theme change happened to occur. Resolve it for
+    // real now that the label is staged, and re-render so the very
+    // first real panel paint already benefits from a correct ambient
+    // colour if the first entry has one configured.
+    this._refreshAmbientForegroundColorHex();
+    this._updateLabel();
+
+    // ORDERING INVARIANT (karen gate, round 4 -- low-severity note, kept
+    // as a comment because the current code is correct and a merged
+    // single call would lose the pre-staging render):
+    //
+    // The _updateLabel() above near _initMenu() can run before the label
+    // is staged, i.e. before _refreshAmbientForegroundColorHex() has a
+    // usable theme node. If a persisted config already gives the FIRST
+    // zone a colour, that earlier render computes colourless entries
+    // against an unresolved ambient. That intermediate state is never
+    // actually painted today only because everything between the two
+    // _updateLabel() calls is synchronous JS -- nothing yields to the
+    // Clutter frame clock, so the compositor never gets a chance to
+    // repaint in between.
+    //
+    // That is a property of the current code, not something enforced.
+    // If a future change inserts an `await`, a GLib.idle_add(), or any
+    // other yield between those two calls, the wrong colours become
+    // briefly visible as a flash on enable/unlock. If you add one, move
+    // the ambient resolve BEFORE the first _updateLabel() (or drop the
+    // earlier render) rather than relying on this invariant holding.
   }
 
   disable() {
@@ -340,6 +459,16 @@ export default class TimezonesExtension extends Extension {
 
     this._saveSettings();
 
+    // karen-gate FIX: this._label's own 'style-changed' handler
+    // (enable()) is disconnected BEFORE this._label.destroy() below,
+    // same pattern as every other tracked signal in this file (see
+    // this._signalId/this._settingsChangedId/this._menuOpenStateId
+    // above).
+    if (this._label && this._labelStyleChangedId) {
+      this._label.disconnect(this._labelStyleChangedId);
+    }
+    this._labelStyleChangedId = null;
+
     // shexli (EGO-L-002): this._label is a child of this._button (added via
     // button.add_child(label) in enable()), so this._button.destroy() below
     // already tears it down transitively -- functionally this was already
@@ -358,6 +487,8 @@ export default class TimezonesExtension extends Extension {
 
     this._button = null;
     this._label = null;
+    this._ambientForegroundColorHex = null;
+    this._applyingOwnLabelStyle = null;
     this._menu = null;
     this._activeMenu = null;
     this._inactiveMenu = null;
@@ -993,19 +1124,79 @@ export default class TimezonesExtension extends Extension {
   // continue to go through _getLabelForTimezone(), which always returns
   // plain text (see its own comment) -- they render via St.Label.text,
   // which would show raw markup syntax literally if given markup.
+  //
+  // Phase 6 FIX (live-testing report: the FIRST panel entry's colour --
+  // both a global default and a per-zone override -- never actually
+  // rendered, every other entry was fine): this is a real GNOME Shell /
+  // Clutter / St platform quirk, not a bug in this file's markup
+  // assembly, confirmed via a real ClutterText/Pango.AttrIterator
+  // resolution against the real render (see the "panel: a GLOBAL
+  // DEFAULT colour genuinely renders on the FIRST entry" and "panel: a
+  // PER-ZONE colour override..." records in
+  // tests/shell-driver/extension.js) and traced to gnome-shell's own
+  // src/st/st-private.c::_st_set_text_from_style():
+  // every St widget style pass installs its OWN whole-text (start=0,
+  // end=G_MAXUINT) FOREGROUND Pango attribute via
+  // clutter_text_set_attributes() to match the resolved CSS 'color'.
+  // ClutterText's clutter_text_ensure_effective_attributes() (in
+  // mutter's clutter/clutter/clutter-text.c) then merges that on TOP of
+  // the markup-parsed attribute list via repeated pango_attr_list_insert()
+  // calls (once per PangoAttrIterator run the whole-text attribute
+  // spans), which -- given Pango resolves same-type/overlapping
+  // attributes by "last in the list wins" -- means St's own whole-text
+  // FOREGROUND ends up sorting AFTER any markup <span foreground> that
+  // ALSO starts at byte offset 0, i.e. specifically the FIRST rendered
+  // character(s). No restructuring of the markup STRING can fix this
+  // (proven empirically: the parsed markup list is copied into the
+  // merge ONCE, before St's attribute list is layered on top of it, so
+  // a start=0 markup span always loses regardless of how it's built);
+  // entries after the first are naturally immune since their span's
+  // start_index is never 0. The only attribute St's own style pass
+  // actually reads is the WIDGET's resolved CSS 'color' -- confirmed by
+  // directly overriding it via St.Widget.set_style() and observing the
+  // winning colour change -- so this works around it by giving the
+  // FIRST entry's colour to the widget itself (so St's own base
+  // attribute already matches it, no collision left to lose) and, so
+  // that doesn't leak into any OTHER entry that has no colour of its
+  // own (which would otherwise silently inherit the first entry's
+  // colour instead of the theme default), giving every such "inherit"
+  // entry an explicit span of its own using the theme's resolved
+  // default colour. Only engages when the first entry actually has an
+  // explicit colour; the common unconfigured case is untouched.
   _updateLabel() {
     let zones = this._activeOrder
       .map((zone) => this._stateByZone.get(zone))
       .filter((item) => item !== undefined);
 
     if (zones.length === 0) {
+      this._setLabelStyle(null);
       this._setPanelText('...');
       return;
     }
 
     let separatorValue = this._resolveSeparatorValue();
     let escapedSeparator = escapeMarkup(separatorValue);
-    let markup = zones.map((item) => this._getMarkupForTimezone(item)).join(escapedSeparator);
+
+    let firstColor = this._getEffectiveFormatting(zones[0].timezone).color;
+    let getMarkupForEntry;
+    if (firstColor) {
+      // this._ambientForegroundColorHex is a CACHED value, refreshed by
+      // _refreshAmbientForegroundColorHex() (see enable() and
+      // this._label's own 'style-changed' handler there) -- never
+      // re-read off this._label directly here, since this._label is the
+      // very widget the set_style() call below mutates (see the
+      // karen-gate comment on that field's declaration for why reading
+      // it while contaminated self-poisons the very next tick).
+      let themeColor = this._ambientForegroundColorHex;
+      this._setLabelStyle(`color: ${firstColor};`);
+      getMarkupForEntry = (item, index) =>
+        index === 0 ? this._getMarkupForTimezone(item) : this._getMarkupForTimezone(item, themeColor);
+    } else {
+      this._setLabelStyle(null);
+      getMarkupForEntry = (item) => this._getMarkupForTimezone(item);
+    }
+
+    let markup = zones.map(getMarkupForEntry).join(escapedSeparator);
     let plainText = () => zones.map((item) => this._getLabelForTimezone({ item })).join(separatorValue);
 
     let validation = this._checkMarkupValid(markup);
@@ -1163,10 +1354,100 @@ export default class TimezonesExtension extends Extension {
   // per-entry font size/color from the effective formatting for `item`'s
   // zone. Only ever used for the panel (_updateLabel()); menu rows always
   // use the plain-text form above.
-  _getMarkupForTimezone(item) {
+  //
+  // `inheritColorOverride`, when given (a sanitized '#rrggbb' string),
+  // replaces an EMPTY (inherit) effective color with that value; it is
+  // never used to override a zone's OWN explicit color. This exists
+  // solely for _updateLabel()'s first-entry base-attribute workaround
+  // below -- see that method's comment for why it is needed.
+  _getMarkupForTimezone(item, inheritColorOverride) {
     let segments = this._computeEntrySegments({ item, full: false });
     let fmt = this._getEffectiveFormatting(item.timezone);
+    if (inheritColorOverride && !fmt.color) {
+      fmt = { ...fmt, color: inheritColorOverride };
+    }
     return buildEntryMarkup(segments, fmt);
+  }
+
+  // Reads `actor`'s currently-resolved theme foreground color (the color
+  // _st_set_text_from_style() -- gnome-shell's src/st/st-private.c --
+  // would otherwise turn into the base Pango FOREGROUND attribute
+  // described in _updateLabel()'s comment) and returns it as a sanitized
+  // '#rrggbb' string, or '' if unavailable (e.g. the actor has not been
+  // through a style pass yet). Best-effort: this only ever feeds a
+  // cosmetic fallback, so any failure here just means that fallback is
+  // skipped for this one render, not a broken panel.
+  //
+  // karen-gate FIX (round 3): `actor` MUST have no inline style applied
+  // at the moment this is called -- see _refreshAmbientForegroundColorHex()
+  // below, the ONLY caller, which guarantees that by clearing
+  // this._label's inline style immediately before calling this and
+  // reapplying it immediately after.
+  _resolveThemeForegroundColorHex(actor) {
+    try {
+      // St.Widget.get_theme_node() logs a St-CRITICAL (not a catchable
+      // JS exception) if the actor is not currently in the stage --
+      // guard against that explicitly rather than relying on the
+      // try/catch below, which cannot suppress it.
+      if (!actor || actor.get_stage() === null) {
+        return '';
+      }
+      let themeNode = actor.get_theme_node();
+      let color = themeNode.get_foreground_color();
+      let toHex = (component) => Math.max(0, Math.min(255, Math.round(component))).toString(16).padStart(2, '0');
+      return sanitizeColor(`#${toHex(color.red)}${toHex(color.green)}${toHex(color.blue)}`);
+    } catch (e) {
+      return '';
+    }
+  }
+
+  // The ONLY method in this file allowed to call this._label.set_style()
+  // -- every call site (_updateLabel(), _refreshAmbientForegroundColorHex()
+  // below) MUST go through this, so this._applyingOwnLabelStyle can
+  // reliably distinguish "this extension changed this._label's own
+  // inline style" from "the real ambient theme changed" in this._label's
+  // 'style-changed' handler (see enable()). Without this single choke
+  // point, any direct this._label.set_style() call anywhere else would
+  // silently bypass the guard and reproduce round 1's self-poisoning bug
+  // one layer up (a set_style()-triggered 'style-changed' being
+  // misread as a genuine ambient change).
+  _setLabelStyle(style) {
+    this._applyingOwnLabelStyle = true;
+    try {
+      this._label.set_style(style);
+    } finally {
+      this._applyingOwnLabelStyle = false;
+    }
+  }
+
+  // Re-resolves this._ambientForegroundColorHex from this._label's OWN
+  // theme node -- see the karen-gate round-3 comment on
+  // this._labelStyleChangedId's declaration in enable() for why this._label
+  // itself (not this._button, not a dedicated probe actor) is the only
+  // correct source, and why it must never be read while an inline style
+  // override is applied.
+  //
+  // Sequencing (measured directly against a real, type-targeted theme
+  // stylesheet -- see tests/shell-driver/extension.js's own "does
+  // set_style(null) immediately followed by get_theme_node()..." record):
+  // save whatever inline style is currently applied, clear it via
+  // _setLabelStyle() (guarded, so this does NOT recursively re-enter
+  // this method through this._label's own 'style-changed' handler), read
+  // the now-uncontaminated theme node, then reapply the saved style so
+  // the visible panel is completely unaffected by this call. Measured
+  // that this needs no extra delay: set_style(null) immediately followed
+  // by get_theme_node().get_foreground_color() already returns the
+  // fresh, uncontaminated colour synchronously -- St's theme-node
+  // recomputation happens as part of set_style()'s own 'style-changed'
+  // emission, not deferred to a later idle/paint step.
+  _refreshAmbientForegroundColorHex() {
+    if (!this._label) {
+      return;
+    }
+    let savedStyle = this._label.get_style();
+    this._setLabelStyle(null);
+    this._ambientForegroundColorHex = this._resolveThemeForegroundColorHex(this._label);
+    this._setLabelStyle(savedStyle);
   }
 
   _updateMenu() {

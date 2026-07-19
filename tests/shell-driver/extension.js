@@ -296,6 +296,23 @@ export default class ShellTestDriver extends Extension {
       assertTrue(!!Main.panel.statusArea[statusAreaKey], 'status area does not reference the button right after enable()');
     });
 
+    record(
+      "panel: this._button, this._label, AND every OTHER child actor under this._button (whatever it is, tracked on `inst` or not) has a REAL, non-NaN allocation -- regression guard for an unpositioned-child Clutter-WARNING (karen-gate finding: an earlier colour-probe actor added as a child of this._button, which uses Clutter.FixedLayout, without an explicit position/size, never received a real allocation at all -- measured directly as x1=NaN x2=NaN y1=NaN y2=NaN -- and spammed 'Can't update stage views ... needs an allocation' into the journal on every run, unnoticed because the log scanner at the time only matched one specific Clutter-WARNING message text). Walking get_children() rather than only checking known fields means this catches ANY future unpositioned child, not just a reintroduction of this exact one.",
+      () => {
+        const assertValidAllocation = (actor, name) => {
+          assertTrue(!!actor, `${name} does not exist`);
+          const box = actor.get_allocation_box();
+          const finite = Number.isFinite(box.x1) && Number.isFinite(box.y1) && Number.isFinite(box.x2) && Number.isFinite(box.y2);
+          assertTrue(finite, `${name}'s allocation box is not finite -- x1=${box.x1} y1=${box.y1} x2=${box.x2} y2=${box.y2}`);
+        };
+        assertValidAllocation(inst._button, 'this._button');
+        assertValidAllocation(inst._label, 'this._label');
+        const children = inst._button.get_children();
+        assertTrue(children.length > 0, 'this._button has no children at all -- unexpected, cannot walk its child allocations');
+        children.forEach((child, i) => assertValidAllocation(child, `this._button's child #${i} (${child.constructor?.name ?? '?'})`));
+      }
+    );
+
     record('panel: default single-zone (UTC) label matches the expected 24h "UTC HH:MM" shape', () => {
       inst._updateLabel();
       const text = inst._label.clutter_text.get_text();
@@ -319,6 +336,93 @@ export default class ShellTestDriver extends Extension {
       assertTrue(inst._label.clutter_text.get_use_markup() === true, 'use_markup is false despite valid markup -- fell back to plain text');
       assertTrue(inst._lastMarkupFailureLogTime === undefined, 'a markup parse failure was logged for valid, unconfigured markup');
     });
+
+    const hexOfThemeNode = (actor) => {
+      const c = actor.get_theme_node().get_foreground_color();
+      const toHex = (v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0');
+      return `#${toHex(c.red)}${toHex(c.green)}${toHex(c.blue)}`;
+    };
+
+    await recordAsync(
+      "panel: _refreshAmbientForegroundColorHex()'s clear/read/reapply sequence on this._label ITSELF (not this._button) correctly tracks a TYPE-TARGETED theme rule (karen-gate finding: this._button's theme node does NOT track a rule that selects `StLabel` specifically, only this._label's own does)",
+      async () => {
+        const ctx = St.ThemeContext.get_for_stage(global.stage);
+        const theme = ctx.get_theme();
+        const cssPath = GLib.build_filenamev([GLib.get_tmp_dir(), `tzshell-typed-${GLib.DateTime.new_now_local().to_unix()}.css`]);
+        const file = imports.gi.Gio.File.new_for_path(cssPath);
+        let stylesheetLoaded = false;
+
+        try {
+          const buttonBefore = hexOfThemeNode(inst._button);
+          const labelBefore = hexOfThemeNode(inst._label);
+          const ambientBefore = inst._ambientForegroundColorHex;
+          assertEqual(buttonBefore, labelBefore, 'baseline: button and label do not already agree before the theme change -- cannot assert this test at all');
+          assertEqual(ambientBefore, labelBefore, "baseline: inst._ambientForegroundColorHex does not match this._label's own resolved colour before the theme change");
+
+          // A real, plausible theme rule that targets label text
+          // SPECIFICALLY by type, the ordinary way a real GNOME theme
+          // would give a top-bar indicator's text its own colour
+          // distinct from the button chrome around it -- NOT the `*`
+          // selector used by the separate test below, which colours
+          // everything uniformly and structurally cannot expose this
+          // class of divergence.
+          GLib.file_set_contents(cssPath, 'StLabel { color: #abcdef !important; }');
+          stylesheetLoaded = theme.load_stylesheet(file);
+          assertTrue(stylesheetLoaded === true, 'theme.load_stylesheet() returned false -- could not drive a real theme change in this sandbox');
+
+          // inst's own real this._label 'style-changed' handler (wired
+          // in enable()) is what should pick this up -- no manual poke
+          // of inst's internals here, just waiting for the real pipeline.
+          await waitUntil(() => inst._ambientForegroundColorHex !== ambientBefore, 500, 25);
+
+          const buttonAfter = hexOfThemeNode(inst._button);
+          const labelAfter = hexOfThemeNode(inst._label);
+
+          // The control that proves this test actually discriminates:
+          // this._button must NOT have tracked the type-targeted rule
+          // (it only matches `StLabel`) -- if it did, this test's own
+          // premise would be wrong and it would be testing nothing.
+          assertEqual(buttonAfter, buttonBefore, "control failed: this._button's theme node tracked a `StLabel`-targeted rule -- this test's premise (button and label CAN diverge) does not hold in this environment");
+
+          assertEqual(labelAfter, '#abcdef', "this._label's own theme node did not track the real theme change");
+          assertEqual(
+            inst._ambientForegroundColorHex,
+            '#abcdef',
+            'inst._ambientForegroundColorHex did not pick up the type-targeted theme change -- it is still tracking a stale/wrong source'
+          );
+
+          // The actual clear/read/reapply sequencing, exercised through
+          // the REAL internal methods (not a reimplementation): simulate
+          // an active first-entry override, force a refresh, and confirm
+          // (a) the refreshed ambient value is the correct uncontaminated
+          // one, not the override, and (b) the override itself is left
+          // genuinely restored afterwards (the panel's visible state is
+          // unaffected by this call).
+          inst._setLabelStyle('color: #112233;');
+          inst._refreshAmbientForegroundColorHex();
+          assertEqual(
+            inst._ambientForegroundColorHex,
+            '#abcdef',
+            '_refreshAmbientForegroundColorHex() picked up the simulated inline override (#112233) instead of the real ambient theme colour -- the clear-before-read sequencing is broken'
+          );
+          assertEqual(inst._label.get_style(), 'color: #112233;', '_refreshAmbientForegroundColorHex() did not correctly reapply the saved inline style afterwards');
+          inst._setLabelStyle(null);
+        } finally {
+          if (stylesheetLoaded) {
+            try {
+              theme.unload_stylesheet(file);
+            } catch (e) {
+              // best-effort
+            }
+          }
+          GLib.unlink(cssPath);
+          inst._setLabelStyle(null);
+          await waitUntil(() => hexOfThemeNode(inst._label) !== '#abcdef', 500, 25);
+          inst._refreshAmbientForegroundColorHex();
+          inst._updateLabel();
+        }
+      }
+    );
 
     record('panel: a per-zone formatting override (real gsettings write + real _loadSettings/_updateLabel) produces valid markup with the expected non-zero Pango attributes (independent oracle)', () => {
       // Real write path: the 'formatting' GSettings key, exactly as
@@ -352,6 +456,369 @@ export default class ShellTestDriver extends Extension {
       inst._settings.set_value('formatting', new GLib.Variant('a{ss}', {}));
       inst._loadSettings();
     });
+
+    // =====================================================================
+    // 1b. First-entry colour bug (live-testing report): the FIRST panel
+    // entry's colour -- both a global default and a per-zone override --
+    // never actually rendered, while every other entry was fine.
+    //
+    // Root cause (confirmed against a real GNOME Shell/Clutter/Pango
+    // render, not inferred): gnome-shell's own src/st/st-private.c
+    // (_st_set_text_from_style()) installs a whole-text (start=0,
+    // end=G_MAXUINT) base FOREGROUND Pango attribute on every style pass,
+    // via ClutterText's own priv->attrs (clutter_text_set_attributes()).
+    // mutter's clutter/clutter/clutter-text.c
+    // (clutter_text_ensure_effective_attributes()) merges that base
+    // attribute on TOP of the markup-parsed attribute list, and -- since
+    // Pango resolves overlapping same-type attributes by "last attribute
+    // in the list wins" -- St's own base FOREGROUND always ends up
+    // sorting AFTER any markup <span foreground> that ALSO starts at
+    // byte offset 0 (i.e. specifically the FIRST rendered entry). Every
+    // later entry is naturally immune since its span's start_index is
+    // never 0.
+    //
+    // The karen-gate blind spot this closes: every PRE-EXISTING
+    // "Pango.parse_markup() oracle" assertion in this file (e.g. the
+    // "per-zone formatting override" test above) validates the MARKUP
+    // STRING in isolation, independent of ClutterText -- and the string
+    // itself IS perfectly valid, with a correctly-scoped foreground span
+    // for every entry (this bug is invisible to that oracle). None of
+    // them ever inspected what ClutterText/Pango actually resolve to use
+    // at PAINT time (via the real PangoLayout + Pango.AttrIterator,
+    // exactly like pango-renderer.c itself does), which is the only place
+    // this bug is observable. The assertions below close that gap.
+    //
+    // winningForegroundHexAt()/winningWeightAt()/winningSizeAt() below
+    // replicate pango_attr_iterator_get() at a specific byte offset --
+    // the exact API Pango's own renderer uses to resolve "which attribute
+    // of this type is actually in effect here" -- against the REAL
+    // ClutterText layout obtained via a real _updateLabel() call, so
+    // these assertions can only pass if the real render, not just the
+    // assembled string, is correct.
+
+    function winningAttrAt(item_, byteOffset, attrType) {
+      const layout = item_._label.clutter_text.get_layout();
+      const iter = layout.get_attributes().get_iterator();
+      do {
+        const [s, e] = iter.range();
+        if (s <= byteOffset && byteOffset < e) {
+          return iter.get(attrType);
+        }
+      } while (iter.next());
+      return null;
+    }
+
+    function winningForegroundHexAt(item_, byteOffset) {
+      const attr = winningAttrAt(item_, byteOffset, Pango.AttrType.FOREGROUND);
+      if (!attr) return null;
+      const c = attr.as_color().color;
+      const hex = (v) => Math.round((v / 65535) * 255)
+        .toString(16)
+        .padStart(2, '0');
+      return `#${hex(c.red)}${hex(c.green)}${hex(c.blue)}`;
+    }
+
+    function winningWeightAt(item_, byteOffset) {
+      const attr = winningAttrAt(item_, byteOffset, Pango.AttrType.WEIGHT);
+      return attr ? attr.as_int().value : null;
+    }
+
+    function winningSizeAt(item_, byteOffset) {
+      const attr = winningAttrAt(item_, byteOffset, Pango.AttrType.SIZE);
+      return attr ? attr.as_size().size : null;
+    }
+
+    // The fix's first-entry workaround routes entry 1's colour through
+    // the WIDGET's own 'color' CSS style (see extension.js's
+    // _updateLabel() comment) rather than a markup <span> -- the same
+    // path gnome-shell itself uses for every themed St.Label everywhere.
+    // gnome-shell's own src/st/st-private.c
+    // (_st_set_text_from_style()) converts the theme's 0-255 colour
+    // components to Pango's 16-bit scale via "* 255" instead of the
+    // colour-accurate "* 257" (255*255=65025, not 65535), a harmless,
+    // universal, ~0.8%-per-channel rounding quirk that is NOT specific
+    // to this extension and not something extension.js can control --
+    // it affects every St widget's CSS-driven text colour identically.
+    // Entries other than the first go through Pango's own markup parser
+    // instead (exact, no such rounding), so this tolerance is ONLY
+    // needed for entry-1 assertions, never for the "no leak" control
+    // (which reads back via the same theme-node accessor as the fix
+    // itself, so it stays exact).
+    function assertColorCloseTo(actualHex, expectedHex, message) {
+      assertTrue(!!actualHex && !!expectedHex, `${message} (actual=${JSON.stringify(actualHex)} expected=${JSON.stringify(expectedHex)})`);
+      const toRgb = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+      const [ar, ag, ab] = toRgb(actualHex);
+      const [er, eg, eb] = toRgb(expectedHex);
+      const TOLERANCE = 4;
+      const close = Math.abs(ar - er) <= TOLERANCE && Math.abs(ag - eg) <= TOLERANCE && Math.abs(ab - eb) <= TOLERANCE;
+      assertTrue(close, `${message}: got ${actualHex}, expected ~${expectedHex} (within ${TOLERANCE}/channel)`);
+    }
+
+    record(
+      'panel: a GLOBAL DEFAULT colour genuinely renders on the FIRST entry (not just in the assembled markup string) -- the real ClutterText/Pango render, via Pango.AttrIterator, the same resolution mechanism pango-renderer.c itself uses',
+      () => {
+        const nyItem = inst._stateByZone.get('America/New_York');
+        const beforeDefaults = targetModules.parseFormatting(inst._settings.get_string('formatting-defaults'));
+        try {
+          inst._toggleTimezone(nyItem);
+          assertEqual(inst._activeOrder, ['UTC', 'America/New_York']);
+
+          inst._settings.set_string(
+            'formatting-defaults',
+            targetModules.serializeFormatting({ ...beforeDefaults, color: '#ff0000', size: 0, boldCity: false, boldTime: false, boldZone: false })
+          );
+          inst._loadSettings();
+          inst._updateLabel();
+
+          // Position 0 is always inside the first entry's own text (its
+          // markup span, if the bug is fixed, or lost to the theme's
+          // base colour if it is not).
+          assertColorCloseTo(
+            winningForegroundHexAt(inst, 0),
+            '#ff0000',
+            'the FIRST entry does not actually render its configured global-default colour (the exact live-testing report)'
+          );
+
+          // Control: the LAST entry, which was never affected by this
+          // bug, must still work -- proves this assertion technique
+          // itself is discriminating (not just "always passes"/vacuous),
+          // and proves the fix did not regress the entries that already
+          // worked.
+          const fullText = inst._label.clutter_text.get_text();
+          const lastEntryStart = fullText.lastIndexOf('New York');
+          assertTrue(lastEntryStart > 0, `could not locate the second entry inside the rendered text: ${JSON.stringify(fullText)}`);
+          assertEqual(
+            winningForegroundHexAt(inst, lastEntryStart),
+            '#ff0000',
+            'control failed: the LAST entry (never affected by this bug) does not render its configured colour either -- the assertion technique itself is broken'
+          );
+        } finally {
+          // Always restore state, even on assertion failure, so later
+          // tests are not cascade-broken by this one.
+          if (inst._activeOrder.includes('America/New_York')) {
+            inst._toggleTimezone(nyItem);
+          }
+          inst._settings.set_string('formatting-defaults', targetModules.serializeFormatting(beforeDefaults));
+          inst._loadSettings();
+          inst._updateLabel();
+        }
+      }
+    );
+
+    record(
+      'panel: a PER-ZONE colour override on ONLY the first zone genuinely renders on that entry, and does NOT leak into a second zone that has no colour of its own',
+      () => {
+        const nyItem = inst._stateByZone.get('America/New_York');
+        try {
+          inst._toggleTimezone(nyItem);
+          assertEqual(inst._activeOrder, ['UTC', 'America/New_York']);
+
+          // A real per-zone override, on the FIRST zone only -- exactly
+          // the live-testing report's other reproduction case.
+          // America/New_York deliberately gets NO override of its own,
+          // so it must keep showing the theme's own default colour, not
+          // UTC's override -- this is the specific regression risk of
+          // any fix that works by repurposing the widget's ambient/base
+          // colour to match the first entry.
+          const blob = JSON.stringify({ size: 0, color: '#00ff00', boldCity: false, boldTime: false, boldZone: false });
+          inst._settings.set_value('formatting', new GLib.Variant('a{ss}', { UTC: blob }));
+          inst._loadSettings();
+          inst._updateLabel();
+
+          assertColorCloseTo(
+            winningForegroundHexAt(inst, 0),
+            '#00ff00',
+            'the FIRST entry does not actually render its configured PER-ZONE override colour'
+          );
+
+          const fullText = inst._label.clutter_text.get_text();
+          const secondEntryStart = fullText.lastIndexOf('New York');
+          assertTrue(secondEntryStart > 0, `could not locate the second entry inside the rendered text: ${JSON.stringify(fullText)}`);
+
+          const themeColorHex = inst._ambientForegroundColorHex;
+          assertTrue(!!themeColorHex, 'inst._ambientForegroundColorHex is empty -- cannot assert the no-leak control');
+          assertEqual(
+            winningForegroundHexAt(inst, secondEntryStart),
+            themeColorHex,
+            "the SECOND entry (no colour override of its own) rendered the FIRST entry's colour instead of the theme default -- the fix leaked the override into an unrelated entry"
+          );
+        } finally {
+          if (inst._activeOrder.includes('America/New_York')) {
+            inst._toggleTimezone(nyItem);
+          }
+          inst._settings.set_value('formatting', new GLib.Variant('a{ss}', {}));
+          inst._loadSettings();
+          inst._updateLabel();
+        }
+      }
+    );
+
+    record(
+      'panel: bold AND font-size on the FIRST entry still resolve correctly at real render time (regression guard: this collision mechanism is FOREGROUND-specific -- proven not to affect WEIGHT/SIZE -- but this asserts it stays that way rather than assuming it)',
+      () => {
+        const nyItem = inst._stateByZone.get('America/New_York');
+        const beforeDefaults = targetModules.parseFormatting(inst._settings.get_string('formatting-defaults'));
+        try {
+          inst._toggleTimezone(nyItem);
+          assertEqual(inst._activeOrder, ['UTC', 'America/New_York']);
+
+          inst._settings.set_string(
+            'formatting-defaults',
+            targetModules.serializeFormatting({ ...beforeDefaults, color: '', size: 20, boldCity: true, boldTime: false, boldZone: false })
+          );
+          inst._loadSettings();
+          inst._updateLabel();
+
+          // Position 0 (start of "UTC") -- the first entry's own city
+          // segment, which is bold: WEIGHT must resolve to
+          // PANGO_WEIGHT_BOLD (700), and SIZE must resolve to 20 points
+          // (20 * 1024).
+          assertEqual(winningWeightAt(inst, 0), 700, 'the FIRST entry does not render its configured bold weight');
+          assertEqual(winningSizeAt(inst, 0), 20 * 1024, 'the FIRST entry does not render its configured font size');
+        } finally {
+          if (inst._activeOrder.includes('America/New_York')) {
+            inst._toggleTimezone(nyItem);
+          }
+          inst._settings.set_string('formatting-defaults', targetModules.serializeFormatting(beforeDefaults));
+          inst._loadSettings();
+          inst._updateLabel();
+        }
+      }
+    );
+
+    await recordAsync(
+      'panel: repeated ticks with a first-entry colour active do NOT progressively leak that colour into a colourless second entry (karen-gate finding: the fix used to poison itself on the very next _updateLabel() call)',
+      async () => {
+        const nyItem = inst._stateByZone.get('America/New_York');
+        try {
+          inst._toggleTimezone(nyItem);
+          assertEqual(inst._activeOrder, ['UTC', 'America/New_York']);
+
+          const blob = JSON.stringify({ size: 0, color: '#00ff00', boldCity: false, boldTime: false, boldZone: false });
+          inst._settings.set_value('formatting', new GLib.Variant('a{ss}', { UTC: blob }));
+          inst._loadSettings();
+
+          const themeColorHex = inst._ambientForegroundColorHex;
+          assertTrue(!!themeColorHex, 'inst._ambientForegroundColorHex is empty -- cannot assert this test at all');
+
+          const fullText0 = inst._label.clutter_text.get_text();
+          const secondEntryStart0 = fullText0.lastIndexOf('New York');
+          assertTrue(secondEntryStart0 > 0, `could not locate the second entry: ${JSON.stringify(fullText0)}`);
+
+          // Call _updateLabel() repeatedly with NOTHING else changing in
+          // between -- exactly what an ordinary WallClock tick does
+          // (only the time text differs) -- and re-assert BOTH entries
+          // after every single call. The karen-gate bug reproduced on
+          // call #2 specifically (baseline call #1 was always correct);
+          // a third call is included in case the leak takes more than
+          // one extra tick to fully manifest.
+          for (let tick = 1; tick <= 3; tick++) {
+            inst._updateLabel();
+
+            assertColorCloseTo(
+              winningForegroundHexAt(inst, 0),
+              '#00ff00',
+              `tick ${tick}: the FIRST entry lost its own configured colour`
+            );
+
+            const fullText = inst._label.clutter_text.get_text();
+            const secondEntryStart = fullText.lastIndexOf('New York');
+            assertTrue(secondEntryStart > 0, `tick ${tick}: could not locate the second entry: ${JSON.stringify(fullText)}`);
+            assertEqual(
+              winningForegroundHexAt(inst, secondEntryStart),
+              themeColorHex,
+              `tick ${tick}: the SECOND entry (no colour override of its own) rendered the FIRST entry's colour instead of the theme default -- the fix leaked across repeated ticks`
+            );
+          }
+        } finally {
+          if (inst._activeOrder.includes('America/New_York')) {
+            inst._toggleTimezone(nyItem);
+          }
+          inst._settings.set_value('formatting', new GLib.Variant('a{ss}', {}));
+          inst._loadSettings();
+          inst._updateLabel();
+        }
+      }
+    );
+
+    await recordAsync(
+      'panel: a real theme/stylesheet change (not a settings change) updates a colourless entry\'s rendered colour on the next render, rather than staying baked to the value resolved at an earlier tick',
+      async () => {
+        const nyItem = inst._stateByZone.get('America/New_York');
+        const ctx = St.ThemeContext.get_for_stage(global.stage);
+        const theme = ctx.get_theme();
+        const cssPath = GLib.build_filenamev([GLib.get_tmp_dir(), `tzshell-theme-change-${GLib.DateTime.new_now_local().to_unix()}.css`]);
+        const file = imports.gi.Gio.File.new_for_path(cssPath);
+        let stylesheetLoaded = false;
+
+        try {
+          inst._toggleTimezone(nyItem);
+          assertEqual(inst._activeOrder, ['UTC', 'America/New_York']);
+
+          const blob = JSON.stringify({ size: 0, color: '#00ff00', boldCity: false, boldTime: false, boldZone: false });
+          inst._settings.set_value('formatting', new GLib.Variant('a{ss}', { UTC: blob }));
+          inst._loadSettings();
+          inst._updateLabel();
+
+          const ambientBefore = inst._ambientForegroundColorHex;
+          assertTrue(!!ambientBefore, 'inst._ambientForegroundColorHex is empty -- cannot assert this test at all');
+
+          const fullTextBefore = inst._label.clutter_text.get_text();
+          const secondEntryStartBefore = fullTextBefore.lastIndexOf('New York');
+          assertTrue(secondEntryStartBefore > 0, `could not locate the second entry: ${JSON.stringify(fullTextBefore)}`);
+          assertEqual(
+            winningForegroundHexAt(inst, secondEntryStartBefore),
+            ambientBefore,
+            'baseline: the second entry does not render the theme default before the theme change'
+          );
+
+          // A real, headless-drivable stylesheet reload -- '*' + !important
+          // guarantees this beats whatever specificity the real panel
+          // stylesheet uses for StLabel's colour, so this is a genuine
+          // theme-level change, not a settings change on this extension.
+          GLib.file_set_contents(cssPath, '* { color: #123456 !important; }');
+          stylesheetLoaded = theme.load_stylesheet(file);
+          assertTrue(stylesheetLoaded === true, 'theme.load_stylesheet() returned false -- could not drive a real theme change in this sandbox');
+
+          // this._ambientForegroundColorHex is refreshed by the colour
+          // probe's own 'style-changed' handler (see enable()), which
+          // ALSO calls _updateLabel() itself -- but re-render explicitly
+          // too, exactly like the next real WallClock tick would.
+          await waitUntil(() => inst._ambientForegroundColorHex !== ambientBefore, 500, 25);
+          inst._updateLabel();
+
+          assertEqual(inst._ambientForegroundColorHex, '#123456', 'the ambient colour cache did not pick up the real theme change');
+
+          const fullTextAfter = inst._label.clutter_text.get_text();
+          const secondEntryStartAfter = fullTextAfter.lastIndexOf('New York');
+          assertTrue(secondEntryStartAfter > 0, `could not locate the second entry after the theme change: ${JSON.stringify(fullTextAfter)}`);
+          assertEqual(
+            winningForegroundHexAt(inst, secondEntryStartAfter),
+            '#123456',
+            'the second entry (no colour override of its own) kept the STALE pre-theme-change colour instead of following the real theme change'
+          );
+
+          // The first entry's OWN explicit override must be unaffected by
+          // the theme change -- it is a user setting, not ambient.
+          assertColorCloseTo(winningForegroundHexAt(inst, 0), '#00ff00', "the first entry's own override changed when the theme changed");
+        } finally {
+          if (stylesheetLoaded) {
+            try {
+              theme.unload_stylesheet(file);
+            } catch (e) {
+              // best-effort
+            }
+          }
+          GLib.unlink(cssPath);
+          if (inst._activeOrder.includes('America/New_York')) {
+            inst._toggleTimezone(nyItem);
+          }
+          inst._settings.set_value('formatting', new GLib.Variant('a{ss}', {}));
+          inst._loadSettings();
+          inst._updateLabel();
+        }
+      }
+    );
 
     record('config: toggling the real "Hide system clock" switch actually hides the real dateMenu clock display (establishes a genuine baseline for the teardown-restore check below)', () => {
       // karen-gate audit finding: the original "system clock visibility is
@@ -1171,6 +1638,7 @@ export default class ShellTestDriver extends Extension {
         '_rowDraggables', '_separatorId', '_formatting', '_formattingDefaults',
         '_separatorMenuItems',
         '_signalId', '_settingsChangedId', '_menuOpenStateId',
+        '_labelStyleChangedId', '_ambientForegroundColorHex', '_applyingOwnLabelStyle',
       ].forEach((field) => {
         assertTrue(inst[field] === null, `${field} is not null after disable(): ${JSON.stringify(inst[field])}`);
       });
