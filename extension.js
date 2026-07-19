@@ -26,7 +26,19 @@ import {
   getEffectiveFormatting,
 } from './formatting.js';
 import { SEPARATORS, resolveSeparatorValue } from './separators.js';
-import { FONT_SIZE_PRESETS, COLOR_PALETTE, resolvePresetId } from './formattingPresets.js';
+// KAREN-GATE FIX (round 4, live-testing report): formattingPresets.js
+// (FONT_SIZE_PRESETS/COLOR_PALETTE/resolvePresetId) was ONLY ever used by
+// the popup menu's own "Font size"/"Color" submenus (round 2), both
+// removed in round 3 -- see the this._separatorMenuItems field comment
+// further down for the full history. A round-3 comment here claimed
+// "prefs.js still imports and uses formattingPresets.js directly" --
+// that claim was never actually verified and was FALSE: prefs.js has
+// never imported formattingPresets.js at all (it uses a plain
+// Adw.SpinRow for font size and its own color-chooser widget, not a
+// curated preset list). With formattingPresets.js's only real caller
+// gone, nothing in this project imports it any more, so the module
+// itself (and its dedicated tests in tests/run-tests.js) was removed
+// rather than left as dead code nothing reaches.
 
 // Whitelist of the only config keys this extension ever reads/writes.
 // Anything else present in the 'config' GSettings value (e.g. from a
@@ -100,17 +112,57 @@ export default class TimezonesExtension extends Extension {
     // stored value can never permanently desync (see _syncConfigSwitches).
     this._configSwitches = {};
     // Phase 3 popup-menu picker state: id -> PopupMenuItem row, populated
-    // by _buildSeparatorSubmenu()/_buildFontSizeSubmenu()/
-    // _buildColorSubmenu(). Used by _syncSeparatorSubmenu()/
-    // _syncFontSizeSubmenu()/_syncColorSubmenu() the same way
-    // this._configSwitches is used by _syncConfigSwitches(): forces every
-    // row's ornament back to match the authoritative stored value on
-    // every menu open and on every external gsettings change, so the
-    // visual selection can never permanently desync (see _updateMenu()
-    // and the 'changed' handler below).
+    // by _buildSeparatorSubmenu(). Used by _syncSeparatorSubmenu() the
+    // same way this._configSwitches is used by _syncConfigSwitches():
+    // forces every row's ornament back to match the authoritative stored
+    // value on every menu open and on every external gsettings change, so
+    // the visual selection can never permanently desync (see
+    // _updateMenu() and the 'changed' handler below).
+    //
+    // KAREN-GATE FIX -- live-testing report, GNOME Shell 47/x11, 4 rounds
+    // total (see _buildSeparatorSubmenu()'s comment and
+    // _buildFormattingSubmenu()'s comment for exactly where each row
+    // attaches today):
+    //   Round 1: a PopupSubMenuMenuItem's own `.menu` is an St.ScrollView;
+    //     nesting one inside `this._configMenu` (also an St.ScrollView --
+    //     see `_createScrollableMenuSection()` below) collapsed it to a
+    //     ~2px invisible viewport. Fixed by moving it to `this._menu`.
+    //   Round 2: a second, near-identical submenu ("Formatting", wrapping
+    //     "Font size"/"Color") was nested the same way one level deeper.
+    //     Fixed by flattening -- no PopupSubMenuMenuItem nested inside
+    //     another PopupSubMenu.
+    //   Round 3: flattening made the popup's total content tall enough
+    //     that on real small-but-common screens (1280x720, 1024x768 --
+    //     see tests/README.md's "Minimum supported screen height"
+    //     section) GNOME Shell's own top-level available-height budget
+    //     squeezed EVERY scrollable section (including
+    //     _activeMenu/_inactiveMenu/_configMenu, never part of this bug)
+    //     to single-digit pixels -- the identical "opens and shows
+    //     nothing" symptom from total content volume, not ScrollView
+    //     nesting. Fixed by removing "Font size"/"Color"/the three bold
+    //     switches from the popup entirely.
+    //   Round 4 (this state, a product decision, not a bug fix): the
+    //     three "Bold city"/"Bold time"/"Bold zone" switches are
+    //     RESTORED to the popup -- they are plain `PopupSwitchMenuItem`
+    //     rows with no `St.ScrollView` of their own (unlike "Font
+    //     size"/"Color", which were `PopupSubMenuMenuItem`s), so they
+    //     never had the round-1/round-2 nesting defect, and re-measurement
+    //     (see tests/README.md) confirmed the popup still renders at
+    //     every resolution in the committed matrix with them present.
+    //     "Font size" and "Color" remain OUT of the popup permanently --
+    //     they were a poor substitute for prefs.js's real `Adw.SpinRow`/
+    //     color-chooser widgets even before any of this, and prefs.js's
+    //     "Defaults" group (_buildDefaultsGroup()) already provides full,
+    //     independently-tested equivalents (plus per-zone overrides the
+    //     popup never had), writing the same 'formatting-defaults'
+    //     gsetting this extension reads from (_loadSettings()) and
+    //     renders. The three bold switches persist into that same
+    //     gsetting via _setFormattingDefaultField()/
+    //     _saveFormattingDefaults() (restored, see those methods below) --
+    //     extension.js WRITES 'formatting-defaults' again, for exactly
+    //     these three fields, alongside prefs.js's own direct writes for
+    //     size/color/the same three bold flags.
     this._separatorMenuItems = {};
-    this._fontSizeMenuItems = {};
-    this._colorMenuItems = {};
     // Live drag landing-zone indicator (single reused actor, created
     // lazily on first use). See _showDropIndicatorAt()/_clearDropIndicator().
     this._dropIndicator = null;
@@ -214,9 +266,8 @@ export default class TimezonesExtension extends Extension {
     // path introduced by this 'changed' listener.
     //
     // Connected here (after _initMenu() has built every submenu/switch)
-    // so this._separatorMenuItems/this._fontSizeMenuItems/
-    // this._colorMenuItems/this._configSwitches are already populated by
-    // the time this could ever fire (a signal connected via .connect()
+    // so this._separatorMenuItems/this._configSwitches are already
+    // populated by the time this could ever fire (a signal connected via .connect()
     // cannot receive emissions that happened before the connection was
     // made, so there is no window where this fires before _initMenu()
     // has run). Disconnected in disable() BEFORE this._settings is
@@ -326,8 +377,6 @@ export default class TimezonesExtension extends Extension {
     this._formatting = null;
     this._formattingDefaults = null;
     this._separatorMenuItems = null;
-    this._fontSizeMenuItems = null;
-    this._colorMenuItems = null;
   }
 
   _loadSettings() {
@@ -518,13 +567,17 @@ export default class TimezonesExtension extends Extension {
     this._settings.set_value('separator', new GLib.Variant('s', this._separatorId || ''));
   }
 
-  // Phase 3: persists this._formattingDefaults (mutated by the popup
-  // menu's "Formatting" submenu: font size, color, and the three
-  // per-segment bold switches) to the 'formatting-defaults' gsetting via
-  // serializeFormatting(), which re-sanitizes defensively regardless of
-  // whether the in-memory object is already sanitized -- values chosen in
-  // this menu UI always flow through the same sanitizers as any other
-  // formatting source before reaching gsettings/markup.
+  // Persists this._formattingDefaults (mutated by the popup menu's three
+  // bold switches -- see _buildFormattingSubmenu() -- via
+  // _setFormattingDefaultField() below) to the 'formatting-defaults'
+  // gsetting via serializeFormatting(), which re-sanitizes defensively
+  // regardless of whether the in-memory object is already sanitized --
+  // values chosen in this menu UI always flow through the same sanitizers
+  // as any other formatting source before reaching gsettings/markup.
+  // KAREN-GATE FIX (round 4): restored -- round 3 removed this as dead
+  // code after the bold switches were (temporarily, it turned out)
+  // removed from the popup. See the this._separatorMenuItems field
+  // comment in the constructor for the full round-1..4 history.
   _saveFormattingDefaults() {
     if (!this._settings) {
       return;
@@ -534,10 +587,10 @@ export default class TimezonesExtension extends Extension {
 
   // Sanitizes and stores a single-field update to this._formattingDefaults
   // (e.g. { boldCity: true }), then persists it. Shared by the three bold
-  // switches built in _buildFormattingSubmenu() and by
-  // _selectFontSizePreset()/_selectColorPreset() below, so every write to
+  // switches built in _buildFormattingSubmenu(), so every write to
   // this._formattingDefaults goes through sanitizeFormatting() exactly
-  // once, in one place.
+  // once, in one place. KAREN-GATE FIX (round 4): restored, see
+  // _saveFormattingDefaults()'s comment immediately above.
   _setFormattingDefaultField(field, value) {
     this._formattingDefaults = sanitizeFormatting({ ...this._formattingDefaults, [field]: value });
     this._saveFormattingDefaults();
@@ -555,16 +608,6 @@ export default class TimezonesExtension extends Extension {
     this._addConfigSwitch({ label: 'Show timezone', name: 'showTimezone' });
     this._addConfigSwitch({ label: 'Hide system clock', name: 'hideSystemClock' });
     this._addConfigSwitch({ label: 'Show separator', name: 'showSeparator' });
-
-    // Phase 3: separator picker + global formatting defaults, grouped
-    // under their own submenus (menu real estate is limited, and these
-    // are multi-choice/multi-control pickers rather than single toggles)
-    // rather than adding many more top-level rows. Both are added right
-    // after the existing boolean switches and before the blank separator
-    // + 'Clear clocks' action further below, so existing layout/ordering
-    // is otherwise unchanged.
-    this._buildSeparatorSubmenu();
-    this._buildFormattingSubmenu();
 
     this._activeMenu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem('Active clocks'));
 
@@ -632,8 +675,44 @@ export default class TimezonesExtension extends Extension {
     this._menu.addMenuItem(this._inactiveMenu);
     this._menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem('Config'));
     this._menu.addMenuItem(this._configMenu);
-    this._configMenu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem(''));
-    this._configMenu.addAction('Clear clocks', () => this._clearClocks());
+
+    // Phase 3: separator picker + the three bold-flag switches.
+    // Live-testing report, GNOME Shell 47/x11 -- 4 rounds of fixes, see
+    // _buildSeparatorSubmenu()'s/_buildFormattingSubmenu()'s own comments
+    // and the this._separatorMenuItems field comment above (in the
+    // constructor) for the full history:
+    //   Round 1: a PopupSubMenuMenuItem's own `.menu` is an St.ScrollView;
+    //     nesting one inside `this._configMenu` (also an St.ScrollView,
+    //     see `_createScrollableMenuSection()` below) collapsed it to a
+    //     ~2px invisible viewport. Fixed by adding it to `this._menu`
+    //     (never itself wrapped in a ScrollView) instead.
+    //   Round 2: a second, near-identical submenu ("Formatting", wrapping
+    //     "Font size"/"Color") was nested the same way one level deeper
+    //     and had the same defect. Fixed by flattening -- no
+    //     PopupSubMenuMenuItem nested inside another PopupSubMenu.
+    //   Round 3: flattening made the popup's total content tall enough
+    //     that on real small-but-common screens (1280x720, 1024x768)
+    //     GNOME Shell's own top-level available-height budget squeezed
+    //     EVERY scrollable section (including
+    //     _activeMenu/_inactiveMenu/_configMenu, never part of this bug)
+    //     down to single-digit pixels. Fixed by removing "Font
+    //     size"/"Color"/the three bold switches from the popup entirely.
+    //   Round 4 (this state, a product decision): the three bold
+    //     switches are RESTORED -- plain `PopupSwitchMenuItem` rows with
+    //     no `St.ScrollView` of their own, so they never had the
+    //     round-1/2 nesting defect, and re-measurement confirmed the
+    //     popup still renders at every resolution in the committed
+    //     matrix with them present (see tests/README.md's "Minimum
+    //     supported screen height" section for the re-measured floor).
+    //     "Font size"/"Color" remain out of the popup permanently --
+    //     prefs.js's "Defaults" group already provides full,
+    //     independently-tested equivalents (plus per-zone overrides the
+    //     popup never had).
+    this._buildSeparatorSubmenu();
+    this._buildFormattingSubmenu();
+
+    this._menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem(''));
+    this._menu.addAction('Clear clocks', () => this._clearClocks());
 
     this._menuOpenStateId = this._menu.connect('open-state-changed', (menu, open) => {
       if (open) {
@@ -663,14 +742,18 @@ export default class TimezonesExtension extends Extension {
   // to this._configMenu, so every pre-Phase-3 call site above is
   // unchanged) and optional `getValue`/`setValue` (defaulting to reading/
   // writing this._config[name] + _saveSettings(), i.e. exactly the
-  // original behavior). This lets the three bold-flag switches below
-  // (_buildFormattingSubmenu()) reuse this same widget/sync machinery
-  // while persisting into this._formattingDefaults / the
-  // 'formatting-defaults' gsetting instead of into the 'config' a{sb}
-  // key -- their name ('formattingBoldCity' etc.) is deliberately NOT a
-  // member of CONFIG_KEYS and is never written into this._config, so the
-  // 'config' key's shape/contents are completely unaffected by this
-  // phase.
+  // original behavior). Used by the three bold-flag switches built in
+  // _buildFormattingSubmenu() below (formattingBoldCity/Time/Zone), which
+  // persist into this._formattingDefaults / the 'formatting-defaults'
+  // gsetting instead of the 'config' a{sb} key -- their name is
+  // deliberately NOT a member of CONFIG_KEYS and is never written into
+  // this._config, so the 'config' key's shape/contents are completely
+  // unaffected by them. (These three switches were briefly removed from
+  // the popup in round 3 of the empty-submenu bug fix, then restored in
+  // round 4 -- see the this._separatorMenuItems field comment in the
+  // constructor for the full history. This generalization was kept
+  // through round 3 specifically so restoring them in round 4 needed no
+  // changes here at all.)
   _addConfigSwitch({ label, name, parentMenu, getValue, setValue }) {
     let menu = parentMenu || this._configMenu;
     let readValue = getValue || (() => this._config[name]);
@@ -758,7 +841,12 @@ export default class TimezonesExtension extends Extension {
       this._separatorMenuItems[entry.id] = row;
     });
 
-    this._configMenu.addMenuItem(separatorItem);
+    // Added to `this._menu` (the top-level, non-scrollable menu), NOT
+    // `this._configMenu` -- see the BUG FIX comment on the call site in
+    // _initMenu() for why a scrollable-section-nested St.ScrollView
+    // submenu collapses to an invisible ~2px viewport in real GNOME
+    // Shell.
+    this._menu.addMenuItem(separatorItem);
     this._syncSeparatorSubmenu();
   }
 
@@ -787,128 +875,55 @@ export default class TimezonesExtension extends Extension {
     });
   }
 
-  // Phase 3: builds the "Formatting" submenu (default font size, default
-  // color, per-segment bold) -- global defaults only; per-entry/per-zone
-  // formatting controls are out of scope for this phase (Phase 4's
-  // prefs.js). Grouped under one submenu per the real-estate constraint
-  // instead of five more top-level config rows.
+  // Builds the three "Bold city"/"Bold time"/"Bold zone" switches, added
+  // as flat, direct children of `this._menu` (siblings of "Separator",
+  // never nested inside any PopupSubMenu or `_createScrollableMenuSection()`
+  // section). See the this._separatorMenuItems field comment in the
+  // constructor for the full round-1..4 history of why "Font size" and
+  // "Color" (both formerly `PopupSubMenuMenuItem`s, unlike these three
+  // plain `PopupSwitchMenuItem` rows) are NOT here and never will be
+  // again -- in short: these three never had the ScrollView-nesting
+  // defect that broke "Font size"/"Color" in rounds 1-2 (a
+  // PopupSwitchMenuItem has no `.menu`/no St.ScrollView of its own at
+  // all), and re-measurement after restoring them (round 4, see
+  // tests/README.md's "Minimum supported screen height" section)
+  // confirmed the popup still renders correctly at every resolution in
+  // the committed matrix with them present.
   _buildFormattingSubmenu() {
-    let formattingItem = new PopupMenu.PopupSubMenuMenuItem('Formatting');
-    formattingItem.accessible_name = 'Formatting defaults';
-    this._configMenu.addMenuItem(formattingItem);
-
-    this._buildFontSizeSubmenu(formattingItem.menu);
-    this._buildColorSubmenu(formattingItem.menu);
-
     this._addConfigSwitch({
       label: 'Bold city',
       name: 'formattingBoldCity',
-      parentMenu: formattingItem.menu,
+      parentMenu: this._menu,
       getValue: () => this._formattingDefaults.boldCity,
       setValue: (value) => this._setFormattingDefaultField('boldCity', value),
     });
     this._addConfigSwitch({
       label: 'Bold time',
       name: 'formattingBoldTime',
-      parentMenu: formattingItem.menu,
+      parentMenu: this._menu,
       getValue: () => this._formattingDefaults.boldTime,
       setValue: (value) => this._setFormattingDefaultField('boldTime', value),
     });
     this._addConfigSwitch({
       label: 'Bold zone',
       name: 'formattingBoldZone',
-      parentMenu: formattingItem.menu,
+      parentMenu: this._menu,
       getValue: () => this._formattingDefaults.boldZone,
       setValue: (value) => this._setFormattingDefaultField('boldZone', value),
     });
   }
 
-  // Nested "Font size" submenu: a small preset ladder (formattingPresets.js
-  // FONT_SIZE_PRESETS), every value of which is verified by
-  // tests/run-tests.js to survive sanitizeFontSize() unchanged. Values
-  // still flow through sanitizeFormatting() (via _setFormattingDefaultField()
-  // -> serializeFormatting()) on the way to gsettings regardless -- this is
-  // defense in depth, not a substitute for that sanitization boundary.
-  _buildFontSizeSubmenu(parentMenu) {
-    let sizeItem = new PopupMenu.PopupSubMenuMenuItem('Font size');
-    sizeItem.accessible_name = 'Default font size';
-
-    FONT_SIZE_PRESETS.forEach((preset) => {
-      let row = new PopupMenu.PopupMenuItem(preset.label);
-      row.accessible_name = `Font size: ${preset.label}`;
-      row.connect('activate', () => this._selectFontSizePreset(preset.value));
-      sizeItem.menu.addMenuItem(row);
-      this._fontSizeMenuItems[preset.id] = row;
-    });
-
-    parentMenu.addMenuItem(sizeItem);
-    this._syncFontSizeSubmenu();
-  }
-
-  _selectFontSizePreset(value) {
-    this._setFormattingDefaultField('size', value);
-    this._syncFontSizeSubmenu();
-    this._updateLabel();
-  }
-
-  // Uses the pure resolvePresetId() helper (formattingPresets.js) to find
-  // which preset (if any) matches the current default size; degrades to
-  // "no row marked" for a hand-edited dconf value that isn't in the
-  // curated ladder (e.g. 13), rather than throwing or guessing.
-  _syncFontSizeSubmenu() {
-    let selectedId = resolvePresetId(FONT_SIZE_PRESETS, this._formattingDefaults.size);
-    Object.keys(this._fontSizeMenuItems).forEach((id) => {
-      this._fontSizeMenuItems[id].setOrnament(id === selectedId ? PopupMenu.Ornament.DOT : PopupMenu.Ornament.NONE);
-    });
-  }
-
-  // Nested "Color" submenu: a small named palette (formattingPresets.js
-  // COLOR_PALETTE), every value of which is verified by tests/run-tests.js
-  // to survive sanitizeColor() unchanged. No freeform color entry here by
-  // design -- that belongs in Phase 4's prefs.js, which can offer a real
-  // GTK color chooser; the shell popup menu has no equivalent widget.
-  _buildColorSubmenu(parentMenu) {
-    let colorItem = new PopupMenu.PopupSubMenuMenuItem('Color');
-    colorItem.accessible_name = 'Default color';
-
-    COLOR_PALETTE.forEach((preset) => {
-      let row = new PopupMenu.PopupMenuItem(preset.label);
-      row.accessible_name = `Color: ${preset.label}`;
-      row.connect('activate', () => this._selectColorPreset(preset.value));
-      colorItem.menu.addMenuItem(row);
-      this._colorMenuItems[preset.id] = row;
-    });
-
-    parentMenu.addMenuItem(colorItem);
-    this._syncColorSubmenu();
-  }
-
-  _selectColorPreset(value) {
-    this._setFormattingDefaultField('color', value);
-    this._syncColorSubmenu();
-    this._updateLabel();
-  }
-
-  // Same degrade-gracefully behavior as _syncFontSizeSubmenu(), for a
-  // hand-edited dconf color value that isn't in the curated palette
-  // (e.g. '#123456').
-  _syncColorSubmenu() {
-    let selectedId = resolvePresetId(COLOR_PALETTE, this._formattingDefaults.color);
-    Object.keys(this._colorMenuItems).forEach((id) => {
-      this._colorMenuItems[id].setOrnament(id === selectedId ? PopupMenu.Ornament.DOT : PopupMenu.Ornament.NONE);
-    });
-  }
-
-  // Refreshes every Phase 3 picker's visual selection state (separator +
-  // font size + color ornaments) without touching this._configSwitches
-  // (that's still _syncConfigSwitches(), called separately by
-  // _updateMenu() and covers the bold switches too). Shared by
-  // _updateMenu() (menu-open resync) and the settings 'changed' handler
-  // in enable() (external-change resync).
+  // Refreshes the separator submenu's ornament. Shared by _updateMenu()
+  // (menu-open resync) and the settings 'changed' handler in enable()
+  // (external-change resync, e.g. when prefs.js writes a new separator
+  // choice). The three bold switches built by _buildFormattingSubmenu()
+  // above do NOT need their own entry here -- they ride the existing,
+  // generic _syncConfigSwitches() mechanism (via this._configSwitches,
+  // populated by _addConfigSwitch()) exactly like every other config
+  // switch, already called alongside this method by both _updateMenu()
+  // and the 'changed' handler; see _syncConfigSwitches()'s own comment.
   _syncMenuControls() {
     this._syncSeparatorSubmenu();
-    this._syncFontSizeSubmenu();
-    this._syncColorSubmenu();
   }
 
   // Hides/shows GNOME Shell's own top-bar clock label to match

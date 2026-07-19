@@ -154,8 +154,7 @@ own inline reasoning, and the "Verification coverage" section below for
 the honest boundary between what this proves and what remains manual-only.
 In short: this reaches into the REAL, already-enabled extension instance
 and calls its real methods / emits real signals on its real widget tree
-(separator submenu rows, font-size/color preset rows, the three bold
-`PopupSwitchMenuItem`s, the real `_reorderActiveZone`/
+(separator submenu rows, the real `_reorderActiveZone`/
 `_computeInsertionIndex`/`_handleActiveDragOver`/`_acceptActiveDrop`/
 `_getDragSourceZone`, the real `_setLabel()`, and a real, argument-free
 `key-focus-out` signal emission for rename-cancel) -- but it does **not**
@@ -212,6 +211,136 @@ TZSHELL_ALLOW_SKIP=1 tests/run-shell-tests.sh
   unconditionally, not gated by a directory-existence check (a
   disconnected FUSE mount fails `[ -d ... ]`, which silently skipped the
   unmount in an earlier version of this script -- same finding 4).
+
+### Resolution matrix and minimum supported screen height (karen-gate rounds 3-4)
+
+`run-shell-tests.sh` runs its ENTIRE shell-driver suite once per
+resolution in a small, committed matrix by default -- `1024x768`,
+`1280x720`, `1366x768`, `1600x1200` -- re-invoking itself once per
+resolution with `TZSHELL_VIRTUAL_MONITOR` set. Any one resolution failing
+fails the whole script. `TZSHELL_VIRTUAL_MONITOR` remains available to
+force a single resolution (fast local iteration, or reproducing one
+matrix entry in isolation); when it is set, the matrix sweep is skipped
+and exactly that one resolution runs.
+
+```sh
+# Default: sweeps the full resolution matrix, one full sandboxed run each
+tests/run-shell-tests.sh
+
+# Force a single resolution (skips the matrix)
+TZSHELL_VIRTUAL_MONITOR=1280x720 tests/run-shell-tests.sh
+```
+
+**Why this exists:** an earlier round of this project's popup-menu
+empty-submenu bug fix (see extension.js's comment on the
+`this._separatorMenuItems` field, and `tests/shell-driver/extension.js`'s
+section 3b/5b, for the full 3-round history) was verified only against a
+single virtual-monitor resolution. During development that resolution was
+bumped from `800x600` to `1600x1200` specifically because the bug stopped
+reproducing at the larger size -- which turned out to be masking the
+defect, not fixing it: a karen-gate review reproduced the same
+empty-submenu collapse at `1280x720` (a genuinely common real display
+height) even though `1366x768` passed cleanly. A single "comfortable"
+resolution is not sufficient evidence a popup renders usably on real
+hardware -- hence the committed matrix.
+
+**Root cause of the round-3 collapse** (distinct from rounds 1-2's
+nested-`St.ScrollView` structural bug): `PopupSubMenu` sizes itself as
+`min(naturalHeight, availableSpace)`. GNOME Shell's top-level `PopupMenu`
+has no scrolling of its own (only the individual
+`_createScrollableMenuSection()`-wrapped sections -- active zones,
+inactive zones, config switches -- scroll independently); when the
+popup's total flattened content (switches + active/inactive zone lists +
+however many top-level submenus) exceeds the real screen's available
+height, GNOME Shell squeezes EVERY flexible (scrollable) child roughly
+proportionally to fit, including sections that have nothing to do with
+whichever submenu is open. On a short-enough real screen, that squeeze
+collapses everything -- including a perfectly-flat, non-nested submenu --
+to a few unusable pixels. This is a genuinely different mechanism from
+rounds 1-2's ScrollView-in-ScrollView nesting bug, but produces the
+identical user-visible symptom ("opens and shows nothing").
+
+**Fix (round 3):** reduce what the popup menu holds, rather than trying
+to make an ever-taller flat list fit an arbitrarily short real screen.
+`extension.js` kept only the "Separator" submenu in the popup menu.
+"Font size", "Color", and the three "Bold city"/"Bold time"/"Bold zone"
+switches were removed from the popup entirely -- `prefs.js`'s "Defaults"
+group (`_buildDefaultsGroup()`) already provides full, equivalent,
+independently-tested controls for all five (plus per-zone overrides the
+popup never had), writing to the exact same `formatting-defaults`
+gsetting `extension.js` reads from and renders.
+
+**Product decision (round 4):** the three "Bold city"/"Bold time"/"Bold
+zone" switches were RESTORED to the popup menu -- a deliberate scope
+decision, not a bug fix. They are plain `PopupSwitchMenuItem` rows with
+no `St.ScrollView` of their own (unlike "Font size"/"Color", which were
+`PopupSubMenuMenuItem`s -- see the round-1/round-2 nesting bug above),
+so they never had the structural defect that motivated removing "Font
+size"/"Color", and the user judged them "cheap, plain rows... the thing a
+user is most likely to flip quickly without opening a preferences
+window," while font size/color are "deliberate, occasional settings"
+better served by `prefs.js`'s real spin control and colour picker.
+`extension.js` writes `formatting-defaults` again (via
+`_setFormattingDefaultField()`/`_saveFormattingDefaults()`, restored) for
+exactly these three fields -- NOT the `config` a{sb} key -- alongside
+`prefs.js`'s own direct writes for size/color/the same three bold flags.
+"Font size" and "Color" remain out of the popup permanently.
+
+**Measured practical minimum screen height, re-measured for round 4**
+(the three restored bold switches are three more fixed-height rows,
+changing the total layout budget): using a fixed `800px` width and
+binary-searching the height with `TZSHELL_VIRTUAL_MONITOR`, both with the
+default 2-zone active list and with ~10 active zones:
+
+| Height (at 800px width) | Round 3 (no bold switches) | Round 4 (bold switches restored) |
+|---|---|---|
+| 515px | FAILS | FAILS |
+| 520px | PASSES | FAILS |
+| 600px, 650px | PASSES | FAILS |
+| 651px | PASSES | FAILS |
+| 652px | PASSES | **PASSES** |
+| 655px, 665px, 680px, 700px | PASSES | PASSES |
+
+**The floor rose meaningfully: from ~520px (round 3) to ~652px (round
+4)** -- a rise of ~132px, which is exactly consistent with three restored
+`PopupSwitchMenuItem` rows at their measured ~44px each (3 x 44 = 132).
+This is the real number; it is reported here plainly rather than
+smoothed over. It is still comfortably below every resolution in the
+committed matrix: the shortest, `1280x720`, has 720px of nominal screen
+height (before the top panel and window-manager margins are even
+subtracted), a margin of roughly 68px over the measured 652px floor --
+tight enough that `1280x720` is kept in the matrix specifically as the
+early-warning entry closest to this floor. If a future change adds
+meaningfully more fixed-height content to the popup, re-run this exact
+binary search before assuming any resolution in the matrix still has
+headroom -- do not just widen the matrix without re-measuring, and if a
+future floor rises above a matrix entry, that is a STOP-and-report
+condition (a bug this test would then be failing to catch), not a reason
+to quietly bump the matrix past it.
+
+### Text scaling narrows that margin further
+
+The 68px margin is measured in raw pixels at the default text scale, and
+that is not the only thing that consumes it. A karen gate re-ran the real
+suite at `1280x720` with GNOME's `text-scaling-factor` injected into the
+sandbox before shell launch:
+
+| `text-scaling-factor` | Result at 1280x720 |
+| --- | --- |
+| 1.0 (default) | 42/42 PASSES |
+| 1.25 (GNOME's built-in "Large Text" toggle) | 42/42 PASSES |
+| 1.3 | 42/42 PASSES |
+| 1.35 | **40/42 FAILS** -- Separator submenu collapses |
+| 1.4 | **40/42 FAILS** -- same collapse |
+
+So the shipped "Large Text" accessibility toggle is safe, but scaling
+beyond ~1.3 at this resolution reproduces the original empty-submenu bug.
+GNOME Tweaks and some accessibility sliders go well past that (up to
+3.0), so a user CAN reach it without doing anything exotic. This is a
+residual fragility of the layout, not a regression introduced by the fix
+-- but it means the real margin is "68px at default scale", not "68px
+unconditionally". Anyone re-measuring the floor should sweep text scaling
+too, not just resolution.
 
 ## Running all three suites
 
@@ -500,13 +629,49 @@ Covered:
   on the real curated-separator row (not calling `_selectSeparator()`
   directly -- this proves the row's own signal wiring) writes the
   `separator` GSettings key and the panel re-joins with that literal
-  value.
-- **Popup menu formatting defaults**: emitting `'activate'` on real
-  font-size/color preset rows and calling the real `PopupSwitchMenuItem
-  .toggle()` on all three bold switches all write the correct
-  `formatting-defaults` fields, and the panel re-renders as valid markup
-  with non-zero recovered Pango attributes afterward (independent
-  oracle).
+  value. Also covered (see "Popup menu: submenus actually render" below):
+  opening the REAL top-level popup and the REAL "Separator" submenu with
+  real `BoxPointer` positioning, proving it is genuinely mapped and
+  allocated on-screen space, not just present in the object graph, at
+  every resolution in the committed matrix and with both a default and a
+  ~10-zone active list.
+- **Formatting defaults -- font size, color (popup-menu-side, round 3) /
+  font size, color, 3 bold switches (round 4 for the bold switches)**:
+  "Font size" and "Color" were REMOVED from the popup menu permanently
+  (karen-gate round 3 -- see "Minimum supported screen height" below and
+  the extension.js comment on the `this._separatorMenuItems` field for
+  the full history) and now live exclusively in `prefs.js`'s "Defaults"
+  group, covered by `run-prefs-tests.js`'s own real-GTK4/Adw widget suite.
+  This driver covers extension.js's remaining responsibility for those
+  two fields -- reading and rendering a `formatting-defaults` write made
+  the same way `prefs.js` makes it (`serializeFormatting()` into the
+  gsettings key directly) -- by writing that key directly (font size,
+  then color, separately) and asserting `_loadSettings()`/
+  `this._formattingDefaults` picks each one up. The three bold switches
+  were RESTORED to the popup in round 4 (a product decision, not a bug
+  fix -- see "Resolution matrix..." below) and are covered as real popup
+  rows again: emitting the real `PopupSwitchMenuItem.toggle()` on all
+  three writes `formatting-defaults` (NOT the `config` a{sb} key,
+  explicitly checked), and a real external `formatting-defaults` gsettings
+  write (simulating a real `prefs.js` write from a separate process) is
+  proven to flow through the real `'changed'` handler,
+  `_loadSettings()`/`_syncConfigSwitches()`, and the existing reentrancy
+  guard, all the way to the real switch's own visual `.state` flipping
+  (polled, not assumed synchronous). The panel is also asserted to
+  re-render as valid markup with non-zero recovered Pango attributes
+  after all of the above (independent oracle).
+- **Popup menu: submenus actually render, not just exist**: opening the
+  real top-level popup (real `BoxPointer.open()`) and the real
+  "Separator" submenu, then asserting the submenu's own actor/box are
+  `mapped === true` with a real, non-collapsed on-screen height (not an
+  exact height -- see the "Minimum supported screen height" section below
+  for why that would be the wrong assertion), and that its first row is
+  genuinely within that allocated viewport. Run twice per resolution:
+  once with the default (2-zone) active list, once after populating ~10
+  active zones (the scrollable-list-competing-for-space scenario the
+  karen gate specifically reproduced against). A known-good, pre-existing
+  config switch is checked the same way as a calibration control, proving
+  the measurement technique itself produces a real positive reading.
 - **Drag-and-drop**: the real `_computeInsertionIndex()`,
   `_reorderActiveZone()` (order + persistence to the `timezones` key),
   `_getDragSourceZone()` (both source shapes), `_handleActiveDragOver()`

@@ -42,11 +42,18 @@ import GLib from 'gi://GLib';
 GLib.setenv('GSETTINGS_BACKEND', 'memory', true);
 import Gio from 'gi://Gio';
 
-import {
-  FONT_SIZE_PRESETS,
-  COLOR_PALETTE,
-  resolvePresetId,
-} from '../formattingPresets.js';
+// KAREN-GATE FIX (round 4, live-testing report): formattingPresets.js
+// (FONT_SIZE_PRESETS/COLOR_PALETTE/resolvePresetId) backed the panel
+// popup menu's "Font size"/"Color" preset submenus. Those submenus were
+// permanently removed from the popup (see extension.js's comment on the
+// this._separatorMenuItems field in the constructor for the full
+// round-1..4 history) in favor of prefs.js's real Adw.SpinRow/
+// color-chooser widgets, which were never backed by a curated preset
+// list. With formattingPresets.js's only real caller gone, nothing in
+// this project imports it any more, so the module and its dedicated
+// tests (formerly here) were removed rather than left as dead code
+// nothing reaches -- see this file's git history for the removed
+// `formattingPresets: ...`/`resolvePresetId: ...` test blocks.
 
 let passCount = 0;
 let failCount = 0;
@@ -790,73 +797,6 @@ test('resolveSeparatorValue: markup-metacharacter literal is returned verbatim (
 });
 
 // ---------------------------------------------------------------------
-// formattingPresets: font-size preset ladder
-// ---------------------------------------------------------------------
-
-test('formattingPresets: no duplicate font-size preset ids', () => {
-  const ids = FONT_SIZE_PRESETS.map((p) => p.id);
-  assertEqual(new Set(ids).size, ids.length, 'duplicate font-size preset id found');
-});
-
-for (const preset of FONT_SIZE_PRESETS) {
-  test(`formattingPresets: font-size preset "${preset.id}" (${preset.value}) survives sanitizeFontSize unchanged`, () => {
-    assertEqual(sanitizeFontSize(preset.value), preset.value);
-  });
-}
-
-// ---------------------------------------------------------------------
-// formattingPresets: color palette
-// ---------------------------------------------------------------------
-
-test('formattingPresets: no duplicate color palette ids', () => {
-  const ids = COLOR_PALETTE.map((p) => p.id);
-  assertEqual(new Set(ids).size, ids.length, 'duplicate color palette id found');
-});
-
-for (const preset of COLOR_PALETTE) {
-  test(`formattingPresets: color palette "${preset.id}" (${JSON.stringify(preset.value)}) survives sanitizeColor unchanged`, () => {
-    assertEqual(sanitizeColor(preset.value), preset.value);
-  });
-}
-
-// ---------------------------------------------------------------------
-// formattingPresets: resolvePresetId
-// ---------------------------------------------------------------------
-
-test('resolvePresetId: matches a known font-size preset value', () => {
-  assertEqual(resolvePresetId(FONT_SIZE_PRESETS, 14), '14');
-});
-
-test('resolvePresetId: matches the "Default" font-size preset (0)', () => {
-  assertEqual(resolvePresetId(FONT_SIZE_PRESETS, 0), 'default');
-});
-
-test('resolvePresetId: unmatched font size (hand-edited dconf value, e.g. 13) degrades to null', () => {
-  assertEqual(resolvePresetId(FONT_SIZE_PRESETS, 13), null);
-});
-
-test('resolvePresetId: matches a known color palette value', () => {
-  assertEqual(resolvePresetId(COLOR_PALETTE, '#3584e4'), 'blue');
-});
-
-test('resolvePresetId: matches the "Default" color preset (empty string)', () => {
-  assertEqual(resolvePresetId(COLOR_PALETTE, ''), 'default');
-});
-
-test('resolvePresetId: unmatched color (hand-edited dconf value, e.g. #123456) degrades to null', () => {
-  assertEqual(resolvePresetId(COLOR_PALETTE, '#123456'), null);
-});
-
-test('resolvePresetId: empty preset list never throws, degrades to null', () => {
-  assertEqual(resolvePresetId([], 'anything'), null);
-});
-
-test('resolvePresetId: supports a custom match field (e.g. separator "id")', () => {
-  assertEqual(resolvePresetId(SEPARATORS, 'pipe', 'id'), 'pipe');
-  assertEqual(resolvePresetId(SEPARATORS, 'does-not-exist', 'id'), null);
-});
-
-// ---------------------------------------------------------------------
 // global formatting-defaults round trip (Phase 3 menu controls)
 // ---------------------------------------------------------------------
 
@@ -867,16 +807,29 @@ test('serializeFormatting/parseFormatting: round-trips a representative global-d
   assertEqual(roundTripped, defaults);
 });
 
-test('serializeFormatting/parseFormatting: round-trips every font-size preset as a global default', () => {
-  for (const preset of FONT_SIZE_PRESETS) {
-    const defaults = { ...DEFAULT_FORMATTING, size: preset.value };
+// KAREN-GATE FIX (round 4): these two used to iterate formattingPresets.js's
+// FONT_SIZE_PRESETS/COLOR_PALETTE (now removed, see the module-comment
+// note near this file's imports). Representative sample values, matching
+// the actual former preset values so no real coverage is lost, are used
+// directly instead -- this test's purpose was always "does a real
+// sanitizeFontSize()/sanitizeColor()-valid value round-trip through
+// serializeFormatting()/parseFormatting() unchanged," not "does the
+// specific former UI's preset list round-trip."
+const SAMPLE_FONT_SIZES = [0, 8, 9, 10, 11, 12, 14, 16, 20, 24];
+const SAMPLE_COLORS = ['', '#ffffff', '#888888', '#e01b24', '#ff7800', '#f6d32d', '#33d17a', '#3584e4', '#9141ac'];
+
+test('serializeFormatting/parseFormatting: round-trips a representative sample of valid font sizes as a global default', () => {
+  for (const size of SAMPLE_FONT_SIZES) {
+    assertEqual(sanitizeFontSize(size), size, `sample font size ${size} is not itself a valid sanitizeFontSize() output (test data problem)`);
+    const defaults = { ...DEFAULT_FORMATTING, size };
     assertEqual(parseFormatting(serializeFormatting(defaults)), defaults);
   }
 });
 
-test('serializeFormatting/parseFormatting: round-trips every color preset as a global default', () => {
-  for (const preset of COLOR_PALETTE) {
-    const defaults = { ...DEFAULT_FORMATTING, color: preset.value };
+test('serializeFormatting/parseFormatting: round-trips a representative sample of valid colors as a global default', () => {
+  for (const color of SAMPLE_COLORS) {
+    assertEqual(sanitizeColor(color), color, `sample color ${JSON.stringify(color)} is not itself a valid sanitizeColor() output (test data problem)`);
+    const defaults = { ...DEFAULT_FORMATTING, color };
     assertEqual(parseFormatting(serializeFormatting(defaults)), defaults);
   }
 });

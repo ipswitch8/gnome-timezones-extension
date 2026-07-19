@@ -52,6 +52,74 @@ set -u
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 REPO_ROOT="$(pwd)"
 
+# --- Resolution matrix (karen-gate round 3) -------------------------------
+#
+# karen-gate finding: this suite used to run at a SINGLE virtual-monitor
+# resolution (bumped from 800x600 to 1600x1200 during round-2 development
+# specifically because the resolution bump made a real popup-menu-collapse
+# regression stop reproducing -- i.e. the fix at the time was to stop
+# looking, not to actually fix the underlying bug). The gate reproduced the
+# same class of collapse at 1280x720 (a common real display height) even
+# though 1366x768 passed cleanly, proving a single "comfortable" resolution
+# is not sufficient evidence the popup renders usably on real hardware.
+#
+# FIX: this script now runs the ENTIRE shell-driver suite once per
+# resolution in a small, committed matrix, by default. Any one resolution
+# failing fails the whole script. TZSHELL_VIRTUAL_MONITOR remains available
+# to force a SINGLE resolution (e.g. for fast local iteration, or to
+# reproduce one specific matrix entry in isolation) -- when it is set, this
+# script runs exactly that one resolution and does not sweep the matrix.
+#
+# Matrix composition, each chosen for a specific real-world reason:
+#   - 1024x768: a long-lived common minimum ("XGA") -- still shipped on
+#     some real small monitors/projectors.
+#   - 1280x720 ("720p"/HD): extremely common on real laptops and external
+#     displays; this is the exact resolution the karen gate used to
+#     reproduce the round-3 regression.
+#   - 1366x768: the single most common laptop panel resolution in current
+#     real-world usage share.
+#   - 1600x1200: comfortable headroom, kept as the upper end of the matrix
+#     (this was the prior single default) so a regression that ONLY shows
+#     up on generous screens (unlikely, but not impossible) still has a
+#     matrix entry that would catch it.
+#
+# Measured practical minimum (see tests/README.md's "Minimum supported
+# screen height" section for the full binary-search measurement): this
+# extension's popup menu renders correctly down to a screen height of
+# ~520px at 800px width (verified: 800x520 passes, 800x515 fails, with the
+# default 2-zone active list AND with ~10 active zones -- see
+# tests/shell-driver/extension.js's section 3b/5b). All four matrix
+# resolutions above are comfortably above that measured floor; 1024x768 is
+# the matrix entry closest to it and is kept specifically to stay an early
+# warning if that floor ever creeps up again.
+DEFAULT_MATRIX="1024x768 1280x720 1366x768 1600x1200"
+
+if [ -z "${TZSHELL_VIRTUAL_MONITOR:-}" ]; then
+  echo "==> tests/run-shell-tests.sh: no TZSHELL_VIRTUAL_MONITOR set -- sweeping the default resolution matrix: $DEFAULT_MATRIX"
+  matrix_status=0
+  for res in $DEFAULT_MATRIX; do
+    echo ""
+    echo "=============================================================="
+    echo "==> tests/run-shell-tests.sh: resolution $res"
+    echo "=============================================================="
+    if ! TZSHELL_VIRTUAL_MONITOR="$res" TZSHELL_ALLOW_SKIP="${TZSHELL_ALLOW_SKIP:-0}" TZSHELL_TIMEOUT_SECONDS="${TZSHELL_TIMEOUT_SECONDS:-90}" bash "$0"; then
+      echo "==> tests/run-shell-tests.sh: resolution $res FAILED"
+      matrix_status=1
+    fi
+  done
+  echo ""
+  if [ "$matrix_status" -eq 0 ]; then
+    echo "==> tests/run-shell-tests.sh: all resolutions in the matrix passed."
+  else
+    echo "==> tests/run-shell-tests.sh: at least one resolution in the matrix FAILED (see above)."
+  fi
+  exit "$matrix_status"
+fi
+# --- End resolution matrix; below this point, TZSHELL_VIRTUAL_MONITOR is
+#     always set (either by the caller, or by the matrix loop above
+#     re-invoking this same script once per resolution) -- a single,
+#     ordinary sandboxed run follows, exactly as before. ---
+
 TARGET_UUID="inquiries@itwerx.net"
 DRIVER_UUID="shell-driver@tests.local"
 
@@ -141,7 +209,14 @@ mkdir -p "$EXT_DIR" "$DRV_DIR"
 # never a reimplementation, never edited in place. Only files the
 # extension actually ships/needs; tests/, README.md, tools/, screenshot.jpg
 # etc. are intentionally left out.
-for f in extension.js formatting.js formattingPresets.js separators.js timezones.js cityAliases.js metadata.json; do
+#
+# KAREN-GATE FIX (round 4): formattingPresets.js REMOVED from this list --
+# the extension no longer ships that file at all (it backed the popup
+# menu's "Font size"/"Color" preset submenus, both permanently removed;
+# see extension.js's comment on the this._separatorMenuItems field in the
+# constructor for the full history). Copying a file the extension doesn't
+# ship would silently diverge this sandbox from a real install.
+for f in extension.js formatting.js separators.js timezones.js cityAliases.js metadata.json; do
   cp "$REPO_ROOT/$f" "$EXT_DIR/" || { echo "FATAL: failed to copy $f into sandbox"; exit 1; }
 done
 cp -r "$REPO_ROOT/schemas" "$EXT_DIR/schemas" || { echo "FATAL: failed to copy schemas/ into sandbox"; exit 1; }
@@ -157,7 +232,16 @@ SHELL_LOG="$SANDBOX/shell.log"
 export TZSHELL_RESULT_PATH="$RESULT_FILE"
 export TZSHELL_TARGET_UUID="$TARGET_UUID"
 
-VIRTUAL_MONITOR="${TZSHELL_VIRTUAL_MONITOR:-800x600}"
+# TZSHELL_VIRTUAL_MONITOR is always set by this point: either by the
+# caller directly, or by the resolution-matrix loop near the top of this
+# script re-invoking it once per resolution (see the "Resolution matrix"
+# header comment above for the full history/rationale). The `:-1600x1200`
+# fallback below is defensive only -- it should never actually be needed
+# given the check at the top of this script, but a hardcoded, comfortable
+# resolution is a safer fallback than an empty/unset value reaching
+# `gnome-shell --headless --virtual-monitor` if that invariant is ever
+# broken by a future edit.
+VIRTUAL_MONITOR="${TZSHELL_VIRTUAL_MONITOR:-1600x1200}"
 RESULT_TIMEOUT="${TZSHELL_TIMEOUT_SECONDS:-90}"
 
 echo "==> tests/run-shell-tests.sh: launching isolated headless gnome-shell"
@@ -319,6 +403,34 @@ fi
 # string that cannot originate from anywhere else in this codebase -- and
 # nothing broader. Every other CRITICAL/ERROR/WARNING line, from any
 # domain, for any other reason, still fails the run.
+#
+# NOTE on a Clutter-CRITICAL NaN-allocation once suspected here: an
+# earlier round of this investigation briefly added, then REMOVED, an
+# allowlist entry for a
+# `clutter_actor_set_allocation_internal: assertion '!isnan (...)' failed`
+# line, on the claim that it was generic, unavoidable GNOME Shell
+# BoxPointer noise. That specific claim (as originally written, with a
+# specific reproduction count) did not hold up under a second,
+# independent check and was removed as false.
+#
+# What IS true, re-measured directly (see the "ROOT CAUSE" comment on
+# tests/shell-driver/extension.js's "setup: warm up GNOME Shell's
+# BoxPointer positioning..." test, which is the actual fix -- this file
+# intentionally does NOT restate the exact counts here a second time;
+# read them there so there is exactly one place that can go stale): the
+# crash reproduces on whichever `PopupMenu.open()` call is the very FIRST
+# one executed in a freshly-started headless gnome-shell process,
+# independent of which menu it is or what it contains -- including on
+# this extension's OWN already-fully-fixed, flattened menu structure when
+# nothing opens a menu before it. It is a test-harness cold-start ordering
+# artifact, not a defect in extension.js, and not something a log-scanner
+# allowlist should paper over -- the actual fix is the warm-up step in
+# tests/shell-driver/extension.js, run before this suite's own menu-open
+# assertions. If this is ever suspected to have regressed, re-run the
+# exact with/without-warm-up comparison documented there before writing
+# any new claim about it -- a written justification that was not
+# re-verified against the CURRENT code has already been wrong twice in
+# this project's history.
 echo ""
 echo "==> Scanning shell log for JS ERROR/JS WARNING/*-CRITICAL/Clutter markup failures ($SHELL_LOG):"
 LOG_HITS="$SANDBOX/log-hits.txt"
