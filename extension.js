@@ -1354,6 +1354,21 @@ export default class TimezonesExtension extends Extension {
       // harmless (still a no-op) for the Phase 3 bold-flag switches added
       // via this same method, since they never touch hideSystemClock.
       this._applySystemClockVisibility();
+      // Bug fix (live-testing report, see _refreshVisibleTimeLabels()'s
+      // own comment for the full root-cause analysis): every switch built
+      // through this method shares the same class of staleness -- only
+      // this._label (the panel) was refreshed above, never the ALREADY-
+      // OPEN menu's own rows, which is the only place this switch is
+      // reachable from at all. Called unconditionally here, exactly like
+      // _applySystemClockVisibility() just above, for the same reason:
+      // cheap, and correct/no-visible-effect for switches whose value
+      // does not currently affect row content (showCity/showTimezone/
+      // hideSystemClock/the three bold flags -- see
+      // _computeEntrySegments()'s `full` branch, which does not consult
+      // any of them) rather than requiring this handler to track which
+      // switches matter today and silently going stale again the next
+      // time one starts mattering.
+      this._refreshVisibleTimeLabels();
     });
     this._configSwitches[name] = { item: configSwitch, getValue: readValue };
     menu.addMenuItem(configSwitch);
@@ -1915,6 +1930,79 @@ export default class TimezonesExtension extends Extension {
 
   _updateTimeLabels() {
     this._state.forEach((item) => (item.label = this._getLabelForTimezone({ item: item, full: true })));
+  }
+
+  // Live-testing report ("Show Date only works when 'Show all zones on
+  // hover' is enabled as well"): ROOT CAUSE was never a real dependency
+  // between the two switches -- every config switch's 'toggled' handler
+  // (_addConfigSwitch(), below) wrote the new value and refreshed only
+  // this._label (the PANEL), never this._state's cached item.label or the
+  // already-open menu's row actors. Those are only ever refreshed by
+  // _updateMenu(), which historically only ran on menu OPEN
+  // (open-state-changed) or _clearClocks() -- so toggling e.g. "Show
+  // date" while the menu was already open (the only way to reach the
+  // switch at all) left every visible row showing its stale pre-toggle
+  // text until the menu was closed and reopened. The hover popup never
+  // shows this staleness because _showHoverPopup() rebuilds its rows from
+  // scratch on every show (see hoverPopup.js) -- which is almost
+  // certainly why the user perceived a dependency: enabling hover was the
+  // first thing that showed them a freshly-rendered date, not because it
+  // unblocked "Show date" in any real sense.
+  //
+  // FIX, scoped to the actual class of bug (every config switch, not just
+  // "Show date" -- see _addConfigSwitch()'s 'toggled' handler, the single
+  // call site for this method): refresh this._state's cached item.label
+  // (this._updateTimeLabels(), cheap: one _getLabelForTimezone() call per
+  // zone, same work _updateMenu() already did) and then update each
+  // CURRENTLY-BUILT active row's own St.Label text IN PLACE, rather than
+  // calling the heavier _updateActiveMenu() (which removeAll()s and
+  // rebuilds every row from scratch on every keystroke-adjacent toggle).
+  // That heavier rebuild is deliberately NOT used here: it would tear
+  // down and recreate the drag handle + draggable of every active row
+  // (see _clearRowDraggables()/_addActiveMenuRow()) and, worse, would
+  // silently discard an in-progress inline rename (the row's `entry`
+  // actor together with its typed-but-uncommitted text) the instant a
+  // config switch happened to be toggled mid-edit -- neither of which a
+  // config-switch toggle has any business doing. Updating each row's
+  // label actor's `.text` property directly touches only what a switch
+  // toggle should ever affect (the rendered TEXT), leaving every row
+  // actor, its drag handle/draggable, and any open inline-rename `entry`
+  // completely untouched -- the label itself even stays correct (freshly
+  // set here) once a cancelled edit reveals it again.
+  //
+  // this._updateInactiveMenu() (the "Add more clocks" search-result rows,
+  // which also render item.label in its `full: true` form -- see
+  // _updateInactiveMenu()'s own addAction(item.label, ...) call) is safe
+  // to call outright here: it already does a full removeAll()/rebuild on
+  // every single keystroke of the search filter (see the 'text-changed'
+  // handler in _initMenu()) and carries no per-row DnD/edit state of its
+  // own to lose.
+  _refreshVisibleTimeLabels() {
+    this._updateTimeLabels();
+    if (this._activeMenu) {
+      this._activeMenu.box.get_children().forEach((row) => {
+        // Real active-clock rows are the only children of this box that
+        // are drop targets of their own (see _addActiveMenuRow(), which
+        // attaches `acceptDrop` directly to `menuItem` -- exactly the
+        // same discriminator tests/shell-driver/extension.js's own
+        // findActiveRowLabelText() helper uses to find real rows).
+        if (typeof row.acceptDrop !== 'function') {
+          return;
+        }
+        let dragHandle = row.get_children().find((child) => child.dragZoneId !== undefined);
+        let item = dragHandle && this._stateByZone.get(dragHandle.dragZoneId);
+        if (!item) {
+          return;
+        }
+        let label = row.get_children().find((child) => child instanceof St.Label);
+        if (label) {
+          label.text = `${ACTIVE_MARK} ${item.label}`;
+        }
+      });
+    }
+    if (this._inactiveMenu) {
+      this._updateInactiveMenu();
+    }
   }
 
   // Feature A: iterates this._activeOrder (the authoritative display

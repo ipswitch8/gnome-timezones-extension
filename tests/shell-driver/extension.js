@@ -1374,41 +1374,88 @@ export default class ShellTestDriver extends Extension {
       assertFalse(/\(\d/.test(panelText), `expected no date addendum in the panel text: ${JSON.stringify(panelText)}`);
     });
 
-    record('date feature: toggling the real "Show date" switch writes config.showDate=true and NOT date-format/formatting-defaults', () => {
-      const entry = inst._configSwitches.showDate;
-      assertTrue(!!entry, 'no "showDate" config switch tracked -- the popup menu switch was not added');
-      assertTrue(entry.getValue() === false, 'showDate is unexpectedly already true before this test');
-      const beforeDateFormat = inst._settings.get_string('date-format');
-      const beforeFormattingDefaults = inst._settings.get_string('formatting-defaults');
+    // Live-testing bug report: "Show Date only works when 'Show all zones
+    // on hover' is enabled as well." Root-cause diagnosis (see
+    // _refreshVisibleTimeLabels()'s own comment in extension.js for the
+    // full analysis): every config switch's 'toggled' handler only ever
+    // refreshed the PANEL label -- never this._state's cached item.label
+    // or the already-open menu's own row actors, which were only ever
+    // refreshed by _updateMenu() (menu OPEN or _clearClocks()). So a real
+    // user toggling "Show date" while the menu was already open -- the
+    // ONLY way to reach the switch at all -- saw no change until closing
+    // and reopening the menu. The hover popup never showed this
+    // staleness (it rebuilds its rows from scratch on every show), which
+    // is almost certainly why the user perceived a dependency between the
+    // two switches that never actually existed in the code.
+    //
+    // The tests below (through the "turning Show date back OFF" round-
+    // trip test) deliberately open the REAL menu once and keep it open
+    // throughout, calling ONLY the real switch's `.toggle()` method and
+    // then reading the REAL row actor's text straight away -- no
+    // `inst._updateMenu()`/`inst._updateTimeLabels()` helper call
+    // anywhere in between, exactly mirroring a real user click on an
+    // already-open menu. The PREVIOUS version of this suite called
+    // `inst._updateMenu()` immediately after every toggle before reading
+    // the row, which is exactly what let this bug ship: it proved the
+    // eventual state was reachable, never that toggling the switch alone
+    // (as a user actually does) produces it.
+    record(
+      'date feature: opens the real menu before the live-toggle tests below (kept open through the round-trip so those tests can prove no close/reopen is ever needed)',
+      () => {
+        assertTrue(
+          inst._config.showHoverPopup === false,
+          'test setup problem: showHoverPopup must be OFF for this whole section, so the row-refresh assertions below cannot be explained by the (unrelated, always-fresh) hover popup'
+        );
+        inst._menu.open(BoxPointer.PopupAnimation.NONE);
+      }
+    );
 
-      entry.item.toggle(); // real PopupSwitchMenuItem method -> real 'toggled' handler
+    record(
+      'date feature (live user click, menu already open, NO explicit refresh call): toggling the real "Show date" switch ON updates the real visible row IMMEDIATELY -- this is the exact reported bug, reproduced and fixed with showHoverPopup OFF the whole time',
+      () => {
+        const entry = inst._configSwitches.showDate;
+        assertTrue(!!entry, 'no "showDate" config switch tracked -- the popup menu switch was not added');
+        assertTrue(entry.getValue() === false, 'showDate is unexpectedly already true before this test');
+        const beforeDateFormat = inst._settings.get_string('date-format');
+        const beforeFormattingDefaults = inst._settings.get_string('formatting-defaults');
 
-      assertTrue(entry.getValue() === true, 'toggling "Show date" did not flip its stored value');
-      const configKeys = inst._settings.get_value('config').deep_unpack();
-      assertTrue(configKeys.showDate === true, 'the real "config" gsetting does not have showDate=true after toggling');
-      assertEqual(inst._settings.get_string('date-format'), beforeDateFormat, 'date-format must be untouched by the Show date switch');
-      assertEqual(inst._settings.get_string('formatting-defaults'), beforeFormattingDefaults, 'formatting-defaults must be untouched by the Show date switch');
-    });
+        const before = findActiveRowLabelText('UTC');
+        assertTrue(!!before, 'could not find the real UTC row to read its text from before toggling');
+        assertFalse(/\(\d/.test(before), `test setup problem: row already shows a date before toggling: ${JSON.stringify(before)}`);
 
-    record('date feature: with "Show date" ON, a real active-clock menu row DOES contain a date in the (default/locale) configured format', () => {
-      inst._updateMenu();
-      const text = findActiveRowLabelText('UTC');
-      assertTrue(!!text, 'could not find the real UTC row to read its text from');
-      assertTrue(/\(\d/.test(text), `expected a "(<date...>" addendum in the row text with Show date ON: ${JSON.stringify(text)}`);
+        entry.item.toggle(); // real PopupSwitchMenuItem method -> real 'toggled' handler; nothing else called between this and the reads below
 
-      // Cross-check against the REAL formatDateForDisplay()/resolveDateFormat()
-      // (dateFormats.js, imported from the real target extension's own
-      // copy, same convention as targetModules for formatting.js) applied
-      // to "right now" for UTC, rather than just checking "some digits in
-      // parens" -- proves the exact configured format is what actually
-      // rendered, not merely that something date-shaped appeared.
-      const glibTz = GLib.TimeZone.new('UTC');
-      const now = GLib.DateTime.new_now(glibTz);
-      const expectedFormat = targetModules.resolveDateFormat(inst._settings.get_string('date-format'));
-      const expectedDate = targetModules.formatDateForDisplay(now, expectedFormat);
-      assertTrue(expectedDate.length > 0, 'test setup problem: expected a non-empty formatted date for the default format');
-      assertTrue(text.includes(`(${expectedDate})`), `row text does not contain the expected "(${expectedDate})" -- got: ${JSON.stringify(text)}`);
-    });
+        assertTrue(entry.getValue() === true, 'toggling "Show date" did not flip its stored value');
+        const configKeys = inst._settings.get_value('config').deep_unpack();
+        assertTrue(configKeys.showDate === true, 'the real "config" gsetting does not have showDate=true after toggling');
+        assertEqual(inst._settings.get_string('date-format'), beforeDateFormat, 'date-format must be untouched by the Show date switch');
+        assertEqual(inst._settings.get_string('formatting-defaults'), beforeFormattingDefaults, 'formatting-defaults must be untouched by the Show date switch');
+
+        // THE assertion this test exists for: the REAL row actor's text
+        // (never inst._state's item.label, never any other internal
+        // model), read immediately after the toggle with the menu already
+        // open and no helper call in between.
+        const text = findActiveRowLabelText('UTC');
+        assertTrue(!!text, 'could not find the real UTC row to read its text from');
+        assertTrue(
+          /\(\d/.test(text),
+          `expected a "(<date...>" addendum in the row text IMMEDIATELY after toggling Show date ON, menu already open, no explicit refresh call: ${JSON.stringify(text)}`
+        );
+
+        // Cross-check against the REAL formatDateForDisplay()/resolveDateFormat()
+        // (dateFormats.js, imported from the real target extension's own
+        // copy, same convention as targetModules for formatting.js) applied
+        // to "right now" for UTC, rather than just checking "some digits in
+        // parens" -- proves the exact configured format is what actually
+        // rendered, not merely that something date-shaped appeared.
+        const glibTz = GLib.TimeZone.new('UTC');
+        const now = GLib.DateTime.new_now(glibTz);
+        const expectedFormat = targetModules.resolveDateFormat(inst._settings.get_string('date-format'));
+        const expectedDate = targetModules.formatDateForDisplay(now, expectedFormat);
+        assertTrue(expectedDate.length > 0, 'test setup problem: expected a non-empty formatted date for the default format');
+        assertTrue(text.includes(`(${expectedDate})`), `row text does not contain the expected "(${expectedDate})" -- got: ${JSON.stringify(text)}`);
+      }
+    );
 
     record('date feature: with "Show date" ON, the real PANEL label STILL does NOT contain a date -- the design-critical assertion (date must never reach the panel)', () => {
       inst._updateLabel();
@@ -1465,14 +1512,53 @@ export default class ShellTestDriver extends Extension {
       assertTrue(/\(\d{4}-\d{2}-\d{2}\)/.test(text), `expected an ISO-shaped "(YYYY-MM-DD)" date in the row text after switching to the "iso" format: ${JSON.stringify(text)}`);
     });
 
-    record('date feature: turning "Show date" back OFF removes the date from the real menu row again (round-trip)', () => {
-      const entry = inst._configSwitches.showDate;
-      entry.item.toggle();
-      assertTrue(entry.getValue() === false, 'toggling "Show date" back off did not flip its stored value');
-      inst._updateMenu();
-      const text = findActiveRowLabelText('UTC');
-      assertTrue(!!text, 'could not find the real UTC row to read its text from');
-      assertFalse(/\(\d{4}-\d{2}-\d{2}\)/.test(text), `expected the date addendum to be gone again after turning Show date off: ${JSON.stringify(text)}`);
+    record(
+      'date feature (live user click, menu still open, NO explicit refresh call): turning "Show date" back OFF via the real switch removes the date from the real visible row IMMEDIATELY -- round-trip proof of the same live-toggle path',
+      () => {
+        const entry = inst._configSwitches.showDate;
+        entry.item.toggle();
+        assertTrue(entry.getValue() === false, 'toggling "Show date" back off did not flip its stored value');
+        const text = findActiveRowLabelText('UTC'); // no explicit inst._updateMenu() call
+        assertTrue(!!text, 'could not find the real UTC row to read its text from');
+        assertFalse(/\(\d{4}-\d{2}-\d{2}\)/.test(text), `expected the date addendum to be gone again IMMEDIATELY after turning Show date off, no explicit refresh call: ${JSON.stringify(text)}`);
+      }
+    );
+
+    record(
+      'format24 feature (live user click, menu still open, NO explicit refresh call): toggling the real "24 hours format" switch OFF changes the real visible row\'s TIME shape IMMEDIATELY (12-hour AM/PM), proving the SAME class of staleness bug -- and the same fix -- applies to a switch other than "Show date"',
+      () => {
+        const entry = inst._configSwitches.format24;
+        assertTrue(!!entry, 'no "format24" config switch tracked -- the popup menu switch was not added');
+        assertTrue(entry.getValue() === true, 'test setup problem: format24 should still be the schema default (true) entering this test');
+
+        const before = findActiveRowLabelText('UTC');
+        assertTrue(!!before, 'could not find the real UTC row to read its text from before toggling');
+        assertFalse(/\b(AM|PM)\b/.test(before), `test setup problem: row already shows a 12-hour AM/PM time before toggling: ${JSON.stringify(before)}`);
+
+        entry.item.toggle(); // real switch click; nothing else called before reading the row below
+
+        assertTrue(entry.getValue() === false, 'toggling "24 hours format" did not flip its stored value');
+        const configKeys = inst._settings.get_value('config').deep_unpack();
+        assertTrue(configKeys.format24 === false, 'the real "config" gsetting does not have format24=false after toggling');
+
+        const after = findActiveRowLabelText('UTC'); // no explicit inst._updateMenu()/inst._updateTimeLabels() call
+        assertTrue(!!after, 'could not find the real UTC row to read its text from after toggling');
+        assertTrue(
+          /\b(AM|PM)\b/.test(after),
+          `expected a 12-hour AM/PM time in the row text IMMEDIATELY after toggling "24 hours format" off, menu already open, no explicit refresh call: ${JSON.stringify(after)}`
+        );
+
+        // Round-trip back to the schema default so later sections (which
+        // assume format24's default) are unaffected.
+        entry.item.toggle();
+        assertTrue(entry.getValue() === true, 'round-trip toggle back to format24=true did not flip its stored value');
+        const restored = findActiveRowLabelText('UTC');
+        assertFalse(/\b(AM|PM)\b/.test(restored), `expected the 24-hour time shape to be restored after toggling "24 hours format" back on: ${JSON.stringify(restored)}`);
+      }
+    );
+
+    record('date feature: closes the real menu opened above -- everything through the format24 live-toggle test above ran with it open and no reopen', () => {
+      inst._menu.close(BoxPointer.PopupAnimation.NONE);
     });
 
     // LAZY HOVER POPUP baseline (karen-gate finding): captured HERE,
@@ -2101,6 +2187,140 @@ export default class ShellTestDriver extends Extension {
       assertTrue(entry.visible === false, 'cancelEdit() did not hide the entry again');
       assertEqual(inst._labels, beforeLabels, 'labels changed despite the edit being cancelled');
     });
+
+    // Closes a gap left by _refreshVisibleTimeLabels()'s own comment
+    // (extension.js): that comment REASONS (from a static read of
+    // _addActiveMenuRow()) that a config-switch refresh happening while an
+    // inline rename is open is safe, because both `label` and `entry` are
+    // permanent children and rename mode only ever toggles `.visible`. That
+    // reasoning has been wrong before in this project ("I traced it and
+    // it's safe" -- see CLAUDE.md's standing note on exactly this class of
+    // claim), so this drives the real collision instead of trusting the
+    // comment: a real, uncommitted inline rename (via the real edit button
+    // and a real St.Entry) is left open, then a real config-switch toggle
+    // -- the same 'toggled' handler that calls _refreshVisibleTimeLabels()
+    // -- fires underneath it, exactly as it would if a user toggled "Show
+    // date" in one already-open menu while mid-rename on a row in that same
+    // menu.
+    record(
+      'rename: a real, in-progress, UNCOMMITTED inline rename survives a real config-switch refresh happening underneath it -- entry text/visibility/focus untouched, the row\'s HIDDEN St.Label DOES update',
+      () => {
+        inst._updateActiveMenu();
+        const beforeLabels = { ...inst._labels };
+
+        const row = inst._activeMenu.box.get_children().find((c) => typeof c.acceptDrop === 'function');
+        assertTrue(!!row, 'no active-clock row found in the active menu box');
+
+        const entry = row.get_children().find((c) => c instanceof St.Entry);
+        assertTrue(!!entry, 'no inline-rename St.Entry found on the row');
+        const label = row.get_children().find((c) => c instanceof St.Label);
+        assertTrue(!!label, 'no St.Label found on the row');
+
+        const buttons = row.get_children().filter((c) => c instanceof St.Button);
+        // Same discriminator as the cancel test above: dragHandle then
+        // editButton, both St.Button, so the edit button is always last.
+        const editButton = buttons[buttons.length - 1];
+        assertTrue(!!editButton, 'no edit button found on the row');
+
+        editButton.emit('clicked', 1); // real enterEditMode() (StButton::clicked passes the mouse button number)
+        assertTrue(entry.visible === true, 'entering edit mode did not make the entry visible');
+        assertTrue(label.visible === false, 'entering edit mode did not hide the label');
+        assertTrue(
+          global.stage.get_key_focus() === entry.clutter_text,
+          'test setup problem: the real entry does not have real stage-level key focus right after entering edit mode -- the "focus not stolen" check below would be meaningless without this baseline'
+        );
+
+        const typed = 'typing but not committing yet';
+        entry.set_text(typed);
+        const labelTextBefore = label.text;
+
+        // The real collision: toggle a real config switch -- the exact
+        // 'toggled' handler that calls _refreshVisibleTimeLabels() -- WHILE
+        // the rename above is still open and uncommitted. showDate is used
+        // here (schema default false entering this test, restored below).
+        const dateEntry = inst._configSwitches.showDate;
+        assertTrue(!!dateEntry, 'no "showDate" config switch tracked -- the popup menu switch was not added');
+        assertTrue(dateEntry.getValue() === false, 'test setup problem: showDate is unexpectedly already true entering this test');
+        dateEntry.item.toggle();
+        assertTrue(dateEntry.getValue() === true, 'toggling "Show date" mid-rename did not flip its stored value');
+
+        // The rename itself must be completely undisturbed.
+        assertEqual(entry.get_text(), typed, 'the typed-but-uncommitted rename text was clobbered by a config-switch refresh happening mid-edit');
+        assertTrue(entry.visible === true, 'the entry was hidden by a config-switch refresh happening mid-edit');
+        assertTrue(label.visible === false, 'the label was revealed (rename mode was exited) by a config-switch refresh happening mid-edit');
+        assertTrue(
+          global.stage.get_key_focus() === entry.clutter_text,
+          'keyboard focus was stolen away from the entry by a config-switch refresh happening mid-edit'
+        );
+        assertEqual(inst._labels, beforeLabels, 'the "labels" gsetting was written despite no commit happening');
+
+        // ...but the refresh must still have done its real job underneath:
+        // the row's HIDDEN St.Label text changed (a real date addendum now
+        // present), proving _refreshVisibleTimeLabels() genuinely found and
+        // updated this row's label rather than silently skipping it just
+        // because it is hidden right now.
+        assertTrue(label.text !== labelTextBefore, `the row's hidden St.Label was not refreshed underneath the in-progress rename: still ${JSON.stringify(label.text)}`);
+        assertTrue(
+          /\(\d/.test(label.text),
+          `expected a "(<date...>" addendum in the row's hidden St.Label text after toggling Show date ON mid-rename: ${JSON.stringify(label.text)}`
+        );
+
+        // Round-trip showDate back off (leaves later sections' assumption
+        // of the schema default intact), then cancel the still-open rename
+        // via the same real, argument-free key-focus-out mechanism the
+        // test above uses, so this test leaves no open rename and no
+        // written label behind.
+        dateEntry.item.toggle();
+        assertTrue(dateEntry.getValue() === false, 'round-trip toggle back to showDate=false did not flip its stored value');
+
+        entry.clutter_text.emit('key-focus-out'); // real cancelEdit()
+        assertTrue(entry.visible === false, 'cancelEdit() did not hide the entry again after the mid-edit refresh test');
+        assertEqual(inst._labels, beforeLabels, 'labels changed despite the edit ultimately being cancelled');
+      }
+    );
+
+    // Cheap companion check for the same guard, from the other direction:
+    // _refreshVisibleTimeLabels() skips any box child whose acceptDrop is
+    // not a function (see its own comment in extension.js) specifically so
+    // it never mistakes the drop-indicator actor _handleActiveDragOver()
+    // inserts into the same box for a real row. Reuses the exact same
+    // indicator-creation call the DnD section above already proved inserts
+    // a real actor into inst._activeMenu.box.
+    record(
+      'refresh vs. drop indicator: a real drop-indicator actor inserted by _handleActiveDragOver survives a config-switch refresh untouched -- it has no acceptDrop, so the guard in _refreshVisibleTimeLabels() must skip it rather than treating it as a row',
+      () => {
+        const result = inst._handleActiveDragOver(null, null, 0, 0);
+        assertEqual(result, DND.DragMotionResult.MOVE_DROP);
+        assertTrue(!!inst._dropIndicator, 'no drop-indicator actor was created');
+        assertTrue(inst._dropIndicator.get_parent() === inst._activeMenu.box, 'drop-indicator actor was not inserted into the active menu box');
+        assertTrue(
+          typeof inst._dropIndicator.acceptDrop !== 'function',
+          'test setup problem: the drop indicator unexpectedly has an acceptDrop method -- it would no longer discriminate against the guard this test exists to check'
+        );
+
+        const indicatorChildCountBefore = inst._dropIndicator.get_children().length;
+
+        const dateEntry = inst._configSwitches.showDate;
+        assertTrue(!!dateEntry, 'no "showDate" config switch tracked');
+        assertTrue(dateEntry.getValue() === false, 'test setup problem: showDate is unexpectedly already true entering this test');
+
+        let threw = null;
+        try {
+          dateEntry.item.toggle();
+        } catch (e) {
+          threw = e;
+        }
+        assertTrue(threw === null, `a config-switch refresh with a real drop indicator present threw: ${threw && threw.message}`);
+
+        assertTrue(inst._dropIndicator.get_parent() === inst._activeMenu.box, 'the drop indicator was removed/reparented by the refresh');
+        assertEqual(inst._dropIndicator.get_children().length, indicatorChildCountBefore, 'the drop indicator gained/lost children -- it was mutated as if it were a row');
+
+        dateEntry.item.toggle(); // round-trip back to the schema default
+        assertTrue(dateEntry.getValue() === false, 'round-trip toggle back to showDate=false did not flip its stored value');
+
+        inst._clearDropIndicator(); // real cleanup method -- leaves state as a genuinely cancelled drag would
+      }
+    );
 
     // =====================================================================
     // 5b. Popup menu: the "Separator" submenu still renders correctly with
