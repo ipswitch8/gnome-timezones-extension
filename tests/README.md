@@ -5,11 +5,17 @@ that runs a real gnome-shell process. No test framework, no npm.
 
 ## `run-tests.js` -- pure-function suite
 
-Exercises `formatting.js`, `separators.js`, and `formattingPresets.js`
-directly: escaping/sanitization, markup assembly, the `formatting` map's
-read-modify-write helper (`setZoneFormatting`), RGBA->hex conversion
-(`rgbaToHex`), and the per-zone/global-default precedence rule
-(`getEffectiveFormatting`). No GTK/Adw involved.
+Exercises `formatting.js`, `separators.js`, `dateFormats.js`, and
+`hoverPopup.js` directly: escaping/sanitization, markup assembly, the
+`formatting` map's read-modify-write helper (`setZoneFormatting`),
+RGBA->hex conversion (`rgbaToHex`), the per-zone/global-default
+precedence rule (`getEffectiveFormatting`), date-format resolution and
+null-safe formatting (`resolveDateFormat`/`formatDateForDisplay`), and
+the hover popup's row model. No GTK/Adw involved.
+
+(`formattingPresets.js` was deleted along with the popup menu's Font
+size/Color preset submenus -- prefs.js uses a real spin control and
+colour picker instead, and never imported it.)
 
 ```sh
 gjs -m tests/run-tests.js
@@ -123,10 +129,13 @@ tests/run-shell-tests.sh
    bytes) and points `HOME`/`XDG_DATA_HOME`/`XDG_CONFIG_HOME`/
    `XDG_CACHE_HOME`/`XDG_RUNTIME_DIR` at it.
 2. Copies the **real, unmodified** target extension source
-   (`extension.js`, `formatting.js`, `formattingPresets.js`,
-   `separators.js`, `timezones.js`, `cityAliases.js`, `metadata.json`,
+   (`extension.js`, `formatting.js`, `separators.js`, `dateFormats.js`,
+   `hoverPopup.js`, `timezones.js`, `cityAliases.js`, `metadata.json`,
    `schemas/`) into the sandbox's extensions directory verbatim -- never
-   edited, never reimplemented -- and recompiles its schema there.
+   edited, never reimplemented -- and recompiles its schema there. This
+   list must match the one in `run-shell-tests.sh` itself; if you add a
+   module the extension imports, add it in both places or the sandboxed
+   shell will fail to load the extension.
 3. Copies `tests/shell-driver/` (this project's own small companion test
    extension, `shell-driver@tests.local`) alongside it.
 4. Runs `gsettings set org.gnome.shell enabled-extensions
