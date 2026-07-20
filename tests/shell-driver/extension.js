@@ -1614,7 +1614,7 @@ export default class ShellTestDriver extends Extension {
       // feature at all) produces. Field-level checks first (cheap, precise
       // about WHICH thing is missing if this ever regresses)...
       assertTrue(inst._hoverPopup === null, 'a hover-popup actor exists with the toggle off -- the popup must be created lazily, only when toggled on');
-      assertTrue(inst._hoverPopupBox === null, 'a hover-popup row container exists with the toggle off');
+      assertTrue(inst._hoverPopupBox === null, 'a hover-popup column container exists with the toggle off');
       assertTrue(inst._hoverSignalId === null, 'a "notify::hover" connection exists with the toggle off -- must only connect when the popup is created');
       assertTrue(inst._hoverShowTimeoutId === null, 'a hover-show timer is scheduled with the toggle off');
       // ...then the REAL, GObject/Clutter-level proof that would catch a
@@ -1672,7 +1672,7 @@ export default class ShellTestDriver extends Extension {
       }
     });
 
-    record('hover popup: with the toggle OFF, invoking the real show path (_showHoverPopup()) is a harmless no-op -- with the lazy design there is no popup actor to build rows into or show at all', () => {
+    record('hover popup: with the toggle OFF, invoking the real show path (_showHoverPopup()) is a harmless no-op -- with the lazy design there is no popup actor to build columns into or show at all', () => {
       assertTrue(inst._hoverPopup === null, 'popup should not exist before this test (setup problem)');
       let threw = null;
       try {
@@ -1707,7 +1707,7 @@ export default class ShellTestDriver extends Extension {
       // confirms the REAL signal connection (same rigour the teardown
       // section already uses for WallClock/GSettings/button signals).
       assertTrue(!!inst._hoverPopup, 'toggling on did not create the popup actor');
-      assertTrue(!!inst._hoverPopupBox, 'toggling on did not create the popup row container');
+      assertTrue(!!inst._hoverPopupBox, 'toggling on did not create the popup column container');
       assertTrue(!!inst._hoverSignalId, 'toggling on did not connect notify::hover');
       assertTrue(
         Main.layoutManager.uiGroup.get_children().includes(inst._hoverPopup),
@@ -1719,32 +1719,65 @@ export default class ShellTestDriver extends Extension {
       );
     });
 
-    record('hover popup: with the toggle ON, the real show path builds a row for every active zone, in EXACT _activeOrder order (not just membership)', () => {
+    record('hover popup: with the toggle ON, the real show path builds one zone column per active zone plus an interleaved separator column, in EXACT _activeOrder order -- top line reuses the REAL panel entry text, bottom line is that zone\'s date', () => {
       assertEqual(inst._activeOrder, ['UTC', 'America/New_York'], 'test setup problem: unexpected _activeOrder going into this test');
       inst._settings.set_string('date-format', 'iso');
       inst._loadSettings();
 
       inst._showHoverPopup();
 
-      const rowTexts = inst._hoverPopupBox.get_children().map((c) => c.text);
-      assertEqual(rowTexts.length, 2, `expected exactly 2 rows, got ${rowTexts.length}`);
-      assertTrue(rowTexts[0].startsWith('UTC'), `expected row 0 to start with "UTC" (activeOrder[0]): ${JSON.stringify(rowTexts)}`);
-      assertTrue(rowTexts[1].includes('America/New_York'), `expected row 1 to reference America/New_York (activeOrder[1]): ${JSON.stringify(rowTexts)}`);
-      // Real date-format machinery reused, not a second implementation --
-      // same ISO-shape check the date-feature section above uses.
-      assertTrue(/\(\d{4}-\d{2}-\d{2}\)/.test(rowTexts[0]), `expected an ISO-shaped date in row 0: ${JSON.stringify(rowTexts[0])}`);
-      assertTrue(/\(\d{4}-\d{2}-\d{2}\)/.test(rowTexts[1]), `expected an ISO-shaped date in row 1: ${JSON.stringify(rowTexts[1])}`);
+      const columns = inst._hoverPopupBox.get_children();
+      assertEqual(columns.length, 3, `expected exactly 3 columns (zone, separator, zone) for 2 active zones, got ${columns.length}`);
+
+      const cellTexts = (columnBox) => columnBox.get_children().map((label) => label.text);
+      const [utcTop, utcBottom] = cellTexts(columns[0]);
+      const [sepTop, sepBottom] = cellTexts(columns[1]);
+      const [nyTop, nyBottom] = cellTexts(columns[2]);
+
+      // Top line: byte-identical to the REAL panel entry text for the
+      // same zone (_getLabelForTimezone({ item }), the exact function
+      // _updateLabel()'s own plain-text fallback uses) -- proves the
+      // popup reuses the panel's own text assembly instead of a second,
+      // potentially-drifting implementation, at the real shell level
+      // (the pure suite proves the callback-injection CONTRACT; this
+      // proves production actually WIRES the real callback through).
+      assertEqual(
+        utcTop,
+        inst._getLabelForTimezone({ item: inst._stateByZone.get('UTC') }),
+        `UTC top-line text does not match the real panel entry text: ${JSON.stringify(utcTop)}`
+      );
+      assertEqual(
+        nyTop,
+        inst._getLabelForTimezone({ item: inst._stateByZone.get('America/New_York') }),
+        `America/New_York top-line text does not match the real panel entry text: ${JSON.stringify(nyTop)}`
+      );
+
+      // Separator column: the same literal on BOTH lines, matching the
+      // real, currently-resolved panel separator (_resolveSeparatorValue()).
+      const expectedSeparator = inst._resolveSeparatorValue();
+      assertEqual(sepTop, expectedSeparator, `separator column top-line text does not match the real resolved separator: ${JSON.stringify(sepTop)}`);
+      assertEqual(sepBottom, expectedSeparator, `separator column bottom-line text does not match the real resolved separator: ${JSON.stringify(sepBottom)}`);
+
+      // Bottom line: real date-format machinery reused, not a second
+      // implementation -- same ISO-shape check the date-feature section
+      // above uses. Independent of (never equal to) the top line.
+      assertTrue(/^\d{4}-\d{2}-\d{2}$/.test(utcBottom), `expected an ISO-shaped date on UTC's bottom line: ${JSON.stringify(utcBottom)}`);
+      assertTrue(/^\d{4}-\d{2}-\d{2}$/.test(nyBottom), `expected an ISO-shaped date on America/New_York's bottom line: ${JSON.stringify(nyBottom)}`);
+      assertFalse(utcTop === utcBottom, 'top-line and bottom-line text must not be identical -- the two lines are independent');
 
       inst._hideHoverPopup();
     });
 
-    record('hover popup: rows are plain St.Label TEXT (never markup) -- a hostile label survives completely verbatim, with no <b>/<span> tags emitted', () => {
+    record('hover popup: columns are plain St.Label TEXT (never markup) -- a hostile label survives completely verbatim on the top line, with no <b>/<span> tags emitted, on either cell', () => {
       inst._labels['America/New_York'] = '<b>evil</b> & "quotes"';
       inst._showHoverPopup();
-      const row = inst._hoverPopupBox.get_children().find((c) => c.text.includes('evil'));
-      assertTrue(!!row, 'could not find the hostile-label row');
-      assertTrue(row.text.includes('<b>evil</b> & "quotes"'), `expected the hostile label verbatim in plain text: ${JSON.stringify(row.text)}`);
-      assertTrue(row.clutter_text.get_use_markup() === false, 'hover popup row must never have use-markup enabled');
+      const columns = inst._hoverPopupBox.get_children();
+      const nyColumn = columns.find((columnBox) => columnBox.get_children()[0].text.includes('evil'));
+      assertTrue(!!nyColumn, 'could not find the hostile-label column');
+      const [topLabel, bottomLabel] = nyColumn.get_children();
+      assertTrue(topLabel.text.includes('<b>evil</b> & "quotes"'), `expected the hostile label verbatim in plain text: ${JSON.stringify(topLabel.text)}`);
+      assertTrue(topLabel.clutter_text.get_use_markup() === false, 'hover popup top-line label must never have use-markup enabled');
+      assertTrue(bottomLabel.clutter_text.get_use_markup() === false, 'hover popup bottom-line label must never have use-markup enabled');
       inst._hideHoverPopup();
       delete inst._labels['America/New_York'];
     });
@@ -1754,9 +1787,17 @@ export default class ShellTestDriver extends Extension {
       assertEqual(inst._activeOrder, ['America/New_York', 'UTC'], 'test setup problem: reorder did not produce the expected order');
 
       inst._showHoverPopup();
-      const rowTexts = inst._hoverPopupBox.get_children().map((c) => c.text);
-      assertTrue(rowTexts[0].includes('America/New_York'), `expected row 0 to be America/New_York after reorder: ${JSON.stringify(rowTexts)}`);
-      assertTrue(rowTexts[1].startsWith('UTC'), `expected row 1 to be UTC after reorder: ${JSON.stringify(rowTexts)}`);
+      const columns = inst._hoverPopupBox.get_children();
+      assertEqual(columns.length, 3, `expected exactly 3 columns after reorder, got ${columns.length}`);
+      const firstTop = columns[0].get_children()[0].text;
+      const lastTop = columns[2].get_children()[0].text;
+      // Panel-style (non-"full") entry text uses the CITY name derived
+      // from the zone id ("New York"), never the raw zone id itself --
+      // see _computeEntrySegments()'s `full`-false branch -- so this
+      // checks for that city-name form, matching what the real panel
+      // itself would show for this zone.
+      assertTrue(firstTop.includes('New York'), `expected column 0 to be America/New_York (panel-style "New York") after reorder: ${JSON.stringify(firstTop)}`);
+      assertTrue(lastTop.startsWith('UTC'), `expected column 2 to be UTC after reorder: ${JSON.stringify(lastTop)}`);
       inst._hideHoverPopup();
 
       // Restore the exact starting order the DnD section below hard-codes.
@@ -1764,7 +1805,15 @@ export default class ShellTestDriver extends Extension {
       assertEqual(inst._activeOrder, ['UTC', 'America/New_York'], 'failed to restore the original _activeOrder for the DnD section below');
     });
 
-    await recordAsync('hover popup: rendering -- the popup actor and its first row are genuinely mapped with finite, non-collapsed allocation (not just present in the object graph)', async () => {
+    await recordAsync('hover popup: rendering -- the popup, every column, and every column\'s top/bottom labels are genuinely mapped with finite, non-collapsed allocation (not just present in the object graph), AND each column\'s top cell and bottom cell share the EXACT SAME real allocation box (column alignment proven at the real Clutter level, not just in the pure model)', async () => {
+      // A deliberately long custom label (much wider than any date
+      // string) on one zone, alongside the plain default on the other,
+      // so the top-line and bottom-line text naturally differ in width
+      // from column to column -- if every column's top/bottom cells
+      // still share the identical allocation box below, that is real
+      // proof of the FILL-based alignment mechanism, not an accident of
+      // both lines happening to already be the same width.
+      inst._labels['America/New_York'] = 'A Very Long Custom Label For Alignment Testing';
       inst._showHoverPopup();
       await sleep(300);
       try {
@@ -1776,15 +1825,55 @@ export default class ShellTestDriver extends Extension {
         assertTrue(Number.isFinite(popupHeight) && popupHeight > 0, `popup allocation height is not finite/positive: ${popupHeight}`);
         assertTrue(Number.isFinite(popupWidth) && popupWidth > 0, `popup allocation width is not finite/positive: ${popupWidth}`);
 
-        const firstRow = inst._hoverPopupBox.get_children()[0];
-        assertTrue(!!firstRow, 'no first row actor found');
-        assertTrue(firstRow.mapped === true, 'first row is not mapped');
-        const rowBox = firstRow.get_allocation_box();
-        const rowHeight = rowBox.y2 - rowBox.y1;
-        assertTrue(Number.isFinite(rowHeight) && rowHeight > 0, `first row allocation height is not finite/positive: ${rowHeight}`);
+        const columns = inst._hoverPopupBox.get_children();
+        assertEqual(columns.length, 3, `expected exactly 3 columns, got ${columns.length}`);
+
+        columns.forEach((columnBox, index) => {
+          assertTrue(columnBox.mapped === true, `column ${index} is not mapped`);
+          const cells = columnBox.get_children();
+          assertEqual(cells.length, 2, `column ${index} does not have exactly a top and bottom cell`);
+          const [topLabel, bottomLabel] = cells;
+          assertTrue(topLabel.mapped === true, `column ${index}: top label is not mapped`);
+          assertTrue(bottomLabel.mapped === true, `column ${index}: bottom label is not mapped`);
+
+          const topBox = topLabel.get_allocation_box();
+          const bottomBox = bottomLabel.get_allocation_box();
+          [topBox.x1, topBox.x2, topBox.y1, topBox.y2, bottomBox.x1, bottomBox.x2, bottomBox.y1, bottomBox.y2].forEach((coord, coordIndex) => {
+            assertTrue(Number.isFinite(coord), `column ${index}: allocation coordinate #${coordIndex} is not finite`);
+          });
+          const topWidth = topBox.x2 - topBox.x1;
+          const bottomWidth = bottomBox.x2 - bottomBox.x1;
+          const topHeight = topBox.y2 - topBox.y1;
+          const bottomHeight = bottomBox.y2 - bottomBox.y1;
+          assertTrue(topWidth > 0, `column ${index}: top cell allocation width is not positive`);
+          assertTrue(bottomWidth > 0, `column ${index}: bottom cell allocation width is not positive`);
+          assertTrue(topHeight > 0, `column ${index}: top cell allocation height is not positive`);
+          assertTrue(bottomHeight > 0, `column ${index}: bottom cell allocation height is not positive`);
+
+          // THE alignment assertion: the top (entry/separator) cell and
+          // the bottom (date/separator) cell of the SAME column share
+          // the exact same real x-position AND width -- read from real
+          // Clutter allocation boxes after a real layout pass, not from
+          // the pure column model.
+          assertEqual(topBox.x1, bottomBox.x1, `column ${index}: top/bottom cell x1 differ (${topBox.x1} vs ${bottomBox.x1}) -- not aligned`);
+          assertEqual(topBox.x2, bottomBox.x2, `column ${index}: top/bottom cell x2 differ (${topBox.x2} vs ${bottomBox.x2}) -- not aligned`);
+          // Bottom cell must sit strictly below the top cell (two real
+          // stacked lines, not overlapping/collapsed).
+          assertTrue(bottomBox.y1 >= topBox.y2, `column ${index}: bottom cell (y1=${bottomBox.y1}) does not sit below the top cell (y2=${topBox.y2})`);
+        });
+
+        // Cross-column sanity: successive columns must not overlap
+        // horizontally (a real left-to-right row of columns, not
+        // everything collapsed onto the same x).
+        for (let i = 1; i < columns.length; i++) {
+          const prevBox = columns[i - 1].get_allocation_box();
+          const curBox = columns[i].get_allocation_box();
+          assertTrue(curBox.x1 >= prevBox.x2, `column ${i} (x1=${curBox.x1}) overlaps the previous column (x2=${prevBox.x2})`);
+        }
       } finally {
         inst._hideHoverPopup();
         await sleep(100);
+        delete inst._labels['America/New_York'];
       }
     });
 
