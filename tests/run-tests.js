@@ -31,6 +31,14 @@ import {
   resolveSeparatorValue,
 } from '../separators.js';
 
+import {
+  DATE_FORMATS,
+  DEFAULT_DATE_FORMAT_ID,
+  getDateFormatById,
+  resolveDateFormat,
+  formatDateForDisplay,
+} from '../dateFormats.js';
+
 import GLib from 'gi://GLib';
 
 // Forced BEFORE any Gio.Settings object is constructed anywhere in this
@@ -162,6 +170,127 @@ test('separators: every value survives escapeMarkup sanely', () => {
     // characters, so escaping should be a no-op round trip.
     assertEqual(escaped, entry.value, `unexpected escaping change for ${entry.id}`);
   }
+});
+
+// ---------------------------------------------------------------------
+// dateFormats.js: curated list integrity
+// ---------------------------------------------------------------------
+
+test('dateFormats: no duplicate ids', () => {
+  const ids = DATE_FORMATS.map((e) => e.id);
+  const unique = new Set(ids);
+  assertEqual(unique.size, ids.length, 'duplicate id found');
+});
+
+test('dateFormats: no empty id/label/value', () => {
+  for (const entry of DATE_FORMATS) {
+    assertTrue(typeof entry.id === 'string' && entry.id.length > 0, 'empty id');
+    assertTrue(typeof entry.label === 'string' && entry.label.length > 0, `empty label for ${entry.id}`);
+    assertTrue(typeof entry.value === 'string' && entry.value.length > 0, `empty value for ${entry.id}`);
+  }
+});
+
+test('dateFormats: DEFAULT_DATE_FORMAT_ID resolves to a real curated entry', () => {
+  const entry = getDateFormatById(DEFAULT_DATE_FORMAT_ID);
+  assertTrue(entry !== undefined, 'default date format id did not resolve');
+  assertEqual(entry.id, DEFAULT_DATE_FORMAT_ID);
+});
+
+test('dateFormats: getDateFormatById unknown id returns undefined', () => {
+  assertEqual(getDateFormatById('does-not-exist'), undefined);
+});
+
+// ---------------------------------------------------------------------
+// dateFormats.js: resolveDateFormat
+// ---------------------------------------------------------------------
+
+test('resolveDateFormat: curated id resolves to that entry\'s value', () => {
+  assertEqual(resolveDateFormat('iso'), getDateFormatById('iso').value);
+});
+
+test('resolveDateFormat: empty string resolves to the curated default value (not null -- unlike resolveSeparatorValue, there is no legacy fallback to defer to)', () => {
+  assertEqual(resolveDateFormat(''), getDateFormatById(DEFAULT_DATE_FORMAT_ID).value);
+});
+
+test('resolveDateFormat: unset/non-string input resolves to the curated default value', () => {
+  assertEqual(resolveDateFormat(undefined), getDateFormatById(DEFAULT_DATE_FORMAT_ID).value);
+  assertEqual(resolveDateFormat(null), getDateFormatById(DEFAULT_DATE_FORMAT_ID).value);
+  assertEqual(resolveDateFormat(42), getDateFormatById(DEFAULT_DATE_FORMAT_ID).value);
+});
+
+test('resolveDateFormat: an unrecognized literal string is returned as-is (a custom format pattern)', () => {
+  assertEqual(resolveDateFormat('%G-W%V'), '%G-W%V');
+});
+
+test('resolveDateFormat: an over-long literal is capped at MAX_LITERAL_DATE_FORMAT_LENGTH (discriminating: the uncapped input is 200 chars, the result must be far shorter)', () => {
+  const hostile = '%Y'.repeat(100); // 200 chars, not a curated id
+  const resolved = resolveDateFormat(hostile);
+  assertTrue(resolved.length < hostile.length, `expected the resolved literal to be capped, got length ${resolved.length} (input was ${hostile.length})`);
+  assertTrue(resolved.length <= 64, `expected the resolved literal to be capped at 64 chars, got ${resolved.length}`);
+  assertEqual(resolved, hostile.slice(0, resolved.length));
+});
+
+test('resolveDateFormat: hostile input containing markup-significant characters is returned verbatim (capping/escaping is the CALLER\'s job for markup surfaces -- this function only bounds length)', () => {
+  const hostile = '<b>%Y</b>';
+  assertEqual(resolveDateFormat(hostile), hostile);
+});
+
+// ---------------------------------------------------------------------
+// dateFormats.js: formatDateForDisplay
+// ---------------------------------------------------------------------
+
+test('formatDateForDisplay: a valid format produces the expected output for a known fixed date', () => {
+  const dt = GLib.DateTime.new_utc(2026, 7, 20, 12, 0, 0);
+  assertEqual(formatDateForDisplay(dt, '%Y-%m-%d'), '2026-07-20');
+});
+
+test('formatDateForDisplay: an invalid/unsupported specifier falls back to the curated default format rather than propagating null', () => {
+  const dt = GLib.DateTime.new_utc(2026, 7, 20, 12, 0, 0);
+  const result = formatDateForDisplay(dt, '%Q'); // not a real GLib.DateTime specifier
+  assertTrue(typeof result === 'string', 'expected a string result even for an invalid specifier');
+  assertTrue(result.length > 0, 'expected a non-empty fallback result for an invalid specifier');
+  // Must not be (or contain) the literal string "null" -- the exact
+  // regression this fallback exists to prevent.
+  assertFalse(result.includes('null'), `fallback result must never contain the literal text "null": ${JSON.stringify(result)}`);
+});
+
+test('formatDateForDisplay: a format for which GLib.DateTime.format() itself returns null (real, reproduced invalid specifier -- verified empirically on this system, see the assertion below) falls back to the curated default rather than propagating null', () => {
+  // Real GLib.DateTime.format() failure modes are documented as returning
+  // null (not throwing) for an invalid/unsupported specifier or bad
+  // UTF-8. Empirically verified on this system: an empty format string
+  // returns '' here (not null), so '%Q' (already used by the test above)
+  // is the reliable null-producing input actually available in this
+  // environment -- reproduced directly here (rather than trusting the
+  // other test's fallback-only assertions) so this test's own premise is
+  // self-verifying and cannot silently stop testing what it claims to.
+  const dt = GLib.DateTime.new_utc(2026, 7, 20, 12, 0, 0);
+  assertEqual(dt.format('%Q'), null, 'test premise: GLib.DateTime.format(\'%Q\') is expected to return null on this system -- if this ever changes, this test needs a different null-producing input');
+  const result = formatDateForDisplay(dt, '%Q');
+  assertTrue(typeof result === 'string', 'expected a string result, never null/undefined, when the underlying format() call returns null');
+  assertTrue(result.length > 0, 'expected a non-empty fallback result');
+  assertFalse(result.includes('null'), `fallback result must never contain the literal text "null": ${JSON.stringify(result)}`);
+});
+
+test('formatDateForDisplay: output is capped at 100 characters even for a maximally expansion-heavy literal format', () => {
+  const dt = GLib.DateTime.new_utc(2026, 7, 20, 12, 0, 0);
+  const hostile = '%c'.repeat(60); // each %c can expand to a long locale-dependent date+time string
+  const result = formatDateForDisplay(dt, hostile);
+  assertTrue(result.length <= 100, `expected output capped at 100 chars, got ${result.length}`);
+});
+
+test('formatDateForDisplay: never throws for a non-GLib.DateTime input, and returns an empty string', () => {
+  assertEqual(formatDateForDisplay(null, '%Y'), '');
+  assertEqual(formatDateForDisplay(undefined, '%Y'), '');
+  assertEqual(formatDateForDisplay({}, '%Y'), '');
+  assertEqual(formatDateForDisplay('2026-07-20', '%Y'), '');
+  assertEqual(formatDateForDisplay(42, '%Y'), '');
+});
+
+test('formatDateForDisplay: never throws for a non-string/empty formatString, falling back to the curated default format', () => {
+  const dt = GLib.DateTime.new_utc(2026, 7, 20, 12, 0, 0);
+  assertEqual(formatDateForDisplay(dt, ''), formatDateForDisplay(dt, resolveDateFormat('')));
+  assertEqual(formatDateForDisplay(dt, null), formatDateForDisplay(dt, resolveDateFormat('')));
+  assertEqual(formatDateForDisplay(dt, undefined), formatDateForDisplay(dt, resolveDateFormat('')));
 });
 
 // ---------------------------------------------------------------------

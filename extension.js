@@ -27,6 +27,7 @@ import {
   getEffectiveFormatting,
 } from './formatting.js';
 import { SEPARATORS, resolveSeparatorValue } from './separators.js';
+import { resolveDateFormat, formatDateForDisplay } from './dateFormats.js';
 // KAREN-GATE FIX (round 4, live-testing report): formattingPresets.js
 // (FONT_SIZE_PRESETS/COLOR_PALETTE/resolvePresetId) was ONLY ever used by
 // the popup menu's own "Font size"/"Color" submenus (round 2), both
@@ -44,7 +45,7 @@ import { SEPARATORS, resolveSeparatorValue } from './separators.js';
 // Whitelist of the only config keys this extension ever reads/writes.
 // Anything else present in the 'config' GSettings value (e.g. from a
 // tampered/foreign dconf entry) is ignored rather than blindly copied.
-const CONFIG_KEYS = ['format24', 'showCity', 'showTimezone', 'hideSystemClock', 'showSeparator'];
+const CONFIG_KEYS = ['format24', 'showCity', 'showTimezone', 'hideSystemClock', 'showSeparator', 'showDate'];
 
 // Minimum gap between consecutive console.error() calls logging a panel
 // markup parse failure (see _logMarkupFailureThrottled()). _updateLabel()
@@ -90,7 +91,16 @@ export default class TimezonesExtension extends Extension {
       showCity: true,
       showTimezone: false,
       hideSystemClock: false,
-      showSeparator: false
+      showSeparator: false,
+      // Whether each menu-row's FULL form (see _getLabelForTimezone()'s
+      // `full` parameter) also shows that zone's current date. Deliberately
+      // a genuine 'config' a{sb} boolean like every other switch above --
+      // NOT part of "formatting"/"formatting-defaults" (which govern
+      // per-entry Pango-markup appearance, not whether a whole extra
+      // segment is shown at all) and NOT its own dedicated GSettings key
+      // (unlike the "date-format" string key just below, which the actual
+      // format pattern this toggle's date is rendered with comes from).
+      showDate: false
     };
     this._hint = '';
     this._labels = {};
@@ -101,6 +111,12 @@ export default class TimezonesExtension extends Extension {
     // (parseFormatting() output); this._formattingDefaults is the single
     // normalized global-default formatting object.
     this._separatorId = '';
+    // Raw stored 'date-format' key value (resolved to a literal
+    // GLib.DateTime.format() pattern at render time via
+    // resolveDateFormat(), exactly like this._separatorId/
+    // resolveSeparatorValue() above). Only ever consulted when
+    // this._config.showDate is true -- see _getLabelForTimezone().
+    this._dateFormat = '';
     this._formatting = {};
     this._formattingDefaults = { ...DEFAULT_FORMATTING };
     // Tracks whether WE hid GNOME Shell's own top-bar clock, so disable()
@@ -505,6 +521,7 @@ export default class TimezonesExtension extends Extension {
     this._dropIndicator = null;
     this._rowDraggables = null;
     this._separatorId = null;
+    this._dateFormat = null;
     this._formatting = null;
     this._formattingDefaults = null;
     this._separatorMenuItems = null;
@@ -559,6 +576,12 @@ export default class TimezonesExtension extends Extension {
     // only load and normalize the raw stored values.
     let separatorVariant = this._settings.get_value('separator');
     this._separatorId = separatorVariant.deep_unpack();
+
+    // Date feature: raw stored value only, same "resolve at render time"
+    // convention as 'separator' immediately above -- see
+    // _getLabelForTimezone()'s use of resolveDateFormat(this._dateFormat).
+    let dateFormatVariant = this._settings.get_value('date-format');
+    this._dateFormat = dateFormatVariant.deep_unpack();
 
     let formattingVariant = this._settings.get_value('formatting');
     let formattingObj = formattingVariant.deep_unpack();
@@ -739,6 +762,15 @@ export default class TimezonesExtension extends Extension {
     this._addConfigSwitch({ label: 'Show timezone', name: 'showTimezone' });
     this._addConfigSwitch({ label: 'Hide system clock', name: 'hideSystemClock' });
     this._addConfigSwitch({ label: 'Show separator', name: 'showSeparator' });
+    // Date feature: an ordinary 'config' a{sb} boolean switch, same
+    // no-parentMenu/no-getValue/no-setValue shape as every switch above --
+    // _addConfigSwitch()'s defaults (read/write this._config.showDate +
+    // _saveSettings()) are exactly right for it. The actual date FORMAT is
+    // global, prefs.js-only (no popup-menu picker for it, mirroring how
+    // "Font size"/"Color" are prefs.js-only -- see the Round 1-4 history
+    // comment on this._separatorMenuItems above for why this popup avoids
+    // adding more pickers than it can comfortably render).
+    this._addConfigSwitch({ label: 'Show date', name: 'showDate' });
 
     this._activeMenu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem('Active clocks'));
 
@@ -1347,7 +1379,35 @@ export default class TimezonesExtension extends Extension {
   // identical to the pre-Phase-2 output for the same inputs.
   _getLabelForTimezone({ item, full, nameOverride }) {
     let segments = this._computeEntrySegments({ item, full, nameOverride });
-    return buildEntryText(segments);
+    let text = buildEntryText(segments);
+
+    // Date feature: appended ONLY to the full form (menu rows and the
+    // drag-actor preview, per this method's own header comment) -- NEVER
+    // to the panel, which always calls this with `full` falsy (see
+    // _updateLabel()'s `plainText` fallback closure, the only non-`full`
+    // caller). `full` is exactly the same discriminator
+    // _computeEntrySegments() already uses to decide "menu row" vs "panel"
+    // shape above, so this reuses it rather than introducing a second,
+    // possibly-diverging condition.
+    //
+    // Placement: appended at the very end, in parentheses, e.g.
+    // "Home (America/Los_Angeles) EST 7:00 AM (2026-07-20)" -- after the
+    // time, not interleaved with the existing "Name (zone/id) …" prefix
+    // structure (which _computeEntrySegments() already builds and which
+    // this deliberately leaves untouched), so the date reads as a final,
+    // clearly-delimited addendum rather than competing with the zone-id
+    // parenthetical earlier in the same string.
+    if (full && this._config.showDate) {
+      let glibTimezone = GLib.TimeZone.new(item.timezone);
+      let now = GLib.DateTime.new_now(glibTimezone);
+      let formatString = resolveDateFormat(this._dateFormat);
+      let dateText = formatDateForDisplay(now, formatString);
+      if (dateText) {
+        text = `${text} (${dateText})`;
+      }
+    }
+
+    return text;
   }
 
   // Pango-markup form of a single panel entry: per-segment bold and

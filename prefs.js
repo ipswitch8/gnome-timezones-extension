@@ -40,7 +40,8 @@
 //
 // `<control>` is one of: global-size, global-color, global-bold-city,
 // global-bold-time, global-bold-zone, separator, size, color, bold-city,
-// bold-time, bold-zone, clear, expander.
+// bold-time, bold-zone, clear, expander, show-date, date-format,
+// date-format-custom.
 //
 // `<zoneId>` (per-zone widgets only) is the zone's IANA id with every '/'
 // replaced by '_' (see zoneToWidgetId() below), e.g. the zone
@@ -66,6 +67,7 @@ import {
   rgbaToHex,
 } from './formatting.js';
 import { SEPARATORS, DEFAULT_SEPARATOR_ID, getSeparatorById } from './separators.js';
+import { DATE_FORMATS, DEFAULT_DATE_FORMAT_ID, getDateFormatById, resolveDateFormat, formatDateForDisplay } from './dateFormats.js';
 import timezones from './timezones.js';
 
 // Known-zone lookup, mirroring extension.js's own defensive filtering of
@@ -183,6 +185,109 @@ export default class TimezonesPrefs extends ExtensionPreferences {
       }
     });
     group.add(separatorRow);
+
+    // --- Date: "Show date" toggle + global date format ---
+    //
+    // Unlike every other control in this group (which reads/writes
+    // 'formatting-defaults'/'separator'), "Show date" is a genuine
+    // 'config' a{sb} boolean -- the exact same key/shape the popup menu's
+    // own switches (extension.js's _addConfigSwitch()) read and write, so
+    // both surfaces stay in sync via the SAME gsetting, same as every
+    // other dual-surface control in this file. Read-modify-write here
+    // mirrors readFormattingMap()/writeFormattingMap() below: read the
+    // whole map, touch only the one field being changed, write the whole
+    // map back -- never clobbering format24/showCity/showTimezone/
+    // hideSystemClock/showSeparator, none of which this file otherwise
+    // touches at all.
+    const readConfig = () => settings.get_value('config').deep_unpack();
+    const writeConfigField = (field, value) => {
+      settings.set_value('config', new GLib.Variant('a{sb}', { ...readConfig(), [field]: value }));
+    };
+
+    const showDateRow = this._buildBoldRow({
+      title: 'Show date',
+      name: 'tzprefs-show-date',
+      active: Boolean(readConfig().showDate),
+      onChange: (v) => writeConfigField('showDate', v),
+    });
+    showDateRow.subtitle = 'Adds each clock\'s current date to its popup-menu row (not the top-bar panel)';
+    group.add(showDateRow);
+
+    // Live preview text for `value` against "right now", used by both the
+    // curated-format ComboRow (baked into each entry's displayed string,
+    // computed once at construction) and the custom-format EntryRow
+    // (recomputed on every edit, see its 'notify::text' handler below).
+    // Reuses the REAL formatDateForDisplay() (dateFormats.js) -- same
+    // null/invalid-specifier fallback behavior a real render would hit --
+    // rather than calling GLib.DateTime.format() directly here.
+    const previewNow = GLib.DateTime.new_now_local();
+    const previewFor = (formatValue) => formatDateForDisplay(previewNow, formatValue);
+
+    const storedDateFormat = settings.get_string('date-format');
+    const matchedDateEntry = getDateFormatById(storedDateFormat);
+
+    const dateFormatModel = new Gtk.StringList({
+      strings: DATE_FORMATS.map((entry) => `${entry.label} -- ${previewFor(entry.value)}`),
+    });
+    const dateFormatRow = new Adw.ComboRow({
+      title: 'Date format',
+      subtitle: 'Applied to every clock\'s date (global, not per-timezone)',
+      model: dateFormatModel,
+    });
+    nameWidget(dateFormatRow, 'tzprefs-date-format', 'Date format');
+
+    const effectiveDateFormatId = matchedDateEntry ? storedDateFormat : DEFAULT_DATE_FORMAT_ID;
+    const initialDateFormatIndex = DATE_FORMATS.findIndex((entry) => entry.id === effectiveDateFormatId);
+    dateFormatRow.selected = initialDateFormatIndex >= 0 ? initialDateFormatIndex : 0;
+
+    // Custom/literal format entry -- see resolveDateFormat() (dateFormats.js)
+    // for why ANY string not matching a curated id is treated as a literal
+    // GLib.DateTime.format() pattern rather than rejected. Seeded with the
+    // stored value ONLY when it is itself a custom (non-curated) value, so
+    // reopening prefs after picking a curated entry shows this field
+    // empty rather than a stale/misleading previous custom string.
+    const dateFormatCustomRow = new Adw.EntryRow({
+      title: 'Custom format',
+      text: matchedDateEntry ? '' : storedDateFormat || '',
+    });
+    nameWidget(dateFormatCustomRow, 'tzprefs-date-format-custom', 'Custom date format pattern');
+
+    const updateCustomPreview = () => {
+      const text = dateFormatCustomRow.text;
+      dateFormatCustomRow.subtitle =
+        text === '' ? 'GLib.DateTime.format() pattern, e.g. %Y-%m-%d -- overrides the picker above' : `Preview: ${previewFor(text)}`;
+    };
+    updateCustomPreview();
+
+    // `.selected`/`.text` are both set (above) BEFORE either 'notify::*'
+    // handler below is connected, so the initial sync from GSettings does
+    // not itself trigger a write-back -- opening prefs and changing
+    // nothing never touches the 'date-format' key, exactly like the
+    // separator picker above (requirement 5, backward compatibility).
+    dateFormatRow.connect('notify::selected', () => {
+      const entry = DATE_FORMATS[dateFormatRow.selected];
+      if (entry) {
+        settings.set_string('date-format', entry.id);
+      }
+    });
+    group.add(dateFormatRow);
+
+    // Commits on every keystroke ('notify::text'), same immediacy as the
+    // font-size SpinRow below -- only when non-empty: clearing this field
+    // is treated as "stop overriding the picker", not as "write an empty
+    // date-format" (an empty stored value already means "use the curated
+    // default", which would silently fight with whatever the picker above
+    // still visually shows selected). A later pick from the ComboRow above
+    // always writes its own id afterwards regardless, so this asymmetry
+    // never leaves 'date-format' un-overridable from the UI.
+    dateFormatCustomRow.connect('notify::text', () => {
+      updateCustomPreview();
+      const text = dateFormatCustomRow.text;
+      if (text !== '') {
+        settings.set_string('date-format', text);
+      }
+    });
+    group.add(dateFormatCustomRow);
 
     // --- Font size ---
     const sizeAdjustment = new Gtk.Adjustment({

@@ -203,6 +203,18 @@ export default class ShellTestDriver extends Extension {
       assertTrue(typeof targetModules.parseFormatting === 'function', 'parseFormatting not found in imported formatting.js');
     });
 
+    // Date feature: same dynamic-import-from-the-real-copy convention as
+    // formatting.js above, merged into the same targetModules object so
+    // every date-feature test below can cross-check against the REAL
+    // resolveDateFormat()/formatDateForDisplay() (dateFormats.js) rather
+    // than reimplementing that logic.
+    await recordAsync('setup: dynamically import the REAL target dateFormats.js', async () => {
+      const targetDir = `${GLib.path_get_dirname(this.path)}/${targetUuid}`;
+      const dateFormats = await import(`file://${targetDir}/dateFormats.js`);
+      targetModules = { ...targetModules, ...dateFormats };
+      assertTrue(typeof targetModules.resolveDateFormat === 'function', 'resolveDateFormat not found in imported dateFormats.js');
+    });
+
     // --- Enable the real target extension ---
 
     let inst = null;
@@ -1308,6 +1320,160 @@ export default class ShellTestDriver extends Extension {
       'popup menu CONTROL (default 2-zone list): a pre-existing, known-good config switch ("24 hours format") is mapped with real on-screen height right after opening the real popup',
       assertControlRenders
     );
+
+    // =====================================================================
+    // 3c. Date feature: "Show date" switch + "date-format" gsetting,
+    // verified against REAL menu rows (this._activeMenu's actual St.Label
+    // children, built by the real _addActiveMenuRow()/_updateActiveMenu()
+    // -- not just inst._getLabelForTimezone() called in isolation) AND the
+    // real panel label, to prove the date appears ONLY where the design
+    // requires (menu rows) and never in the panel, at every point in this
+    // section.
+    // =====================================================================
+
+    // Real menu-row text reader: mirrors how a genuine row is built in
+    // _addActiveMenuRow() -- `${activeMark} ${item.label}` on an St.Label
+    // child of the row (see that method's own `let label = new St.Label({
+    // text: ... })` -- there is no other stable public accessor for a raw
+    // row's rendered text). Reads the CURRENT St.Label actor's `.text`
+    // directly (not `item.label` on the state object), so this proves what
+    // was actually built into the popup, not just what extension.js
+    // computed internally.
+    const findActiveRowLabelText = (zone) => {
+      const rows = inst._activeMenu.box.get_children().filter((c) => typeof c.acceptDrop === 'function');
+      for (const row of rows) {
+        const label = row.get_children().find((c) => c instanceof St.Label);
+        if (label && label.text.includes(zone)) {
+          return label.text;
+        }
+      }
+      return null;
+    };
+
+    record('date feature setup: "Show date" is off by default and date-format is unset (schema defaults)', () => {
+      assertTrue(inst._config.showDate === false, 'showDate should default to false');
+      assertEqual(inst._settings.get_string('date-format'), '', 'date-format should default to the empty string');
+    });
+
+    record('date feature: with "Show date" OFF, a real active-clock menu row does NOT contain a date', () => {
+      inst._updateMenu(); // real _updateTimeLabels()+_updateActiveMenu(), exactly what a menu open does
+      const text = findActiveRowLabelText('UTC');
+      assertTrue(!!text, 'could not find the real UTC row to read its text from');
+      // A rendered date (any of the curated formats) always contains at
+      // least one digit; the un-dated row is exactly
+      // "<mark> UTC HH:MM" (plus zone abbreviation if shown), which
+      // contains digits too (the time) -- so this asserts the SPECIFIC
+      // "(<date>)" trailing addendum this feature adds is absent, not
+      // merely "no digits at all".
+      assertFalse(/\(\d/.test(text), `expected no "(<date...>" addendum in the row text with Show date OFF: ${JSON.stringify(text)}`);
+    });
+
+    record('date feature: with "Show date" OFF, the real PANEL label does NOT contain a date either (baseline before enabling)', () => {
+      inst._updateLabel();
+      const panelText = inst._label.clutter_text.get_text();
+      assertFalse(/\(\d/.test(panelText), `expected no date addendum in the panel text: ${JSON.stringify(panelText)}`);
+    });
+
+    record('date feature: toggling the real "Show date" switch writes config.showDate=true and NOT date-format/formatting-defaults', () => {
+      const entry = inst._configSwitches.showDate;
+      assertTrue(!!entry, 'no "showDate" config switch tracked -- the popup menu switch was not added');
+      assertTrue(entry.getValue() === false, 'showDate is unexpectedly already true before this test');
+      const beforeDateFormat = inst._settings.get_string('date-format');
+      const beforeFormattingDefaults = inst._settings.get_string('formatting-defaults');
+
+      entry.item.toggle(); // real PopupSwitchMenuItem method -> real 'toggled' handler
+
+      assertTrue(entry.getValue() === true, 'toggling "Show date" did not flip its stored value');
+      const configKeys = inst._settings.get_value('config').deep_unpack();
+      assertTrue(configKeys.showDate === true, 'the real "config" gsetting does not have showDate=true after toggling');
+      assertEqual(inst._settings.get_string('date-format'), beforeDateFormat, 'date-format must be untouched by the Show date switch');
+      assertEqual(inst._settings.get_string('formatting-defaults'), beforeFormattingDefaults, 'formatting-defaults must be untouched by the Show date switch');
+    });
+
+    record('date feature: with "Show date" ON, a real active-clock menu row DOES contain a date in the (default/locale) configured format', () => {
+      inst._updateMenu();
+      const text = findActiveRowLabelText('UTC');
+      assertTrue(!!text, 'could not find the real UTC row to read its text from');
+      assertTrue(/\(\d/.test(text), `expected a "(<date...>" addendum in the row text with Show date ON: ${JSON.stringify(text)}`);
+
+      // Cross-check against the REAL formatDateForDisplay()/resolveDateFormat()
+      // (dateFormats.js, imported from the real target extension's own
+      // copy, same convention as targetModules for formatting.js) applied
+      // to "right now" for UTC, rather than just checking "some digits in
+      // parens" -- proves the exact configured format is what actually
+      // rendered, not merely that something date-shaped appeared.
+      const glibTz = GLib.TimeZone.new('UTC');
+      const now = GLib.DateTime.new_now(glibTz);
+      const expectedFormat = targetModules.resolveDateFormat(inst._settings.get_string('date-format'));
+      const expectedDate = targetModules.formatDateForDisplay(now, expectedFormat);
+      assertTrue(expectedDate.length > 0, 'test setup problem: expected a non-empty formatted date for the default format');
+      assertTrue(text.includes(`(${expectedDate})`), `row text does not contain the expected "(${expectedDate})" -- got: ${JSON.stringify(text)}`);
+    });
+
+    record('date feature: with "Show date" ON, the real PANEL label STILL does NOT contain a date -- the design-critical assertion (date must never reach the panel)', () => {
+      inst._updateLabel();
+      const panelText = inst._label.clutter_text.get_text();
+      assertFalse(/\(\d/.test(panelText), `expected no date addendum in the panel text even with Show date ON: ${JSON.stringify(panelText)}`);
+      // Also cross-checked against panelMarkup()'s own reconstruction (the
+      // exact markup _updateLabel() itself assembled), independent of what
+      // ClutterText ended up displaying.
+      const markup = panelMarkup(inst, targetModules);
+      assertFalse(/\(\d/.test(markup), `expected no date addendum in the reconstructed panel markup: ${JSON.stringify(markup)}`);
+    });
+
+    record('date feature: with "Show date" ON, even the PLAIN-TEXT PANEL FALLBACK (buildEntryText\'s OTHER real caller, engaged when markup rendering fails -- see the "invalid-markup case" test above) still does NOT contain a date -- proves the `full` discriminator inside _getLabelForTimezone() itself, not just "the panel normally uses a different code path"', () => {
+      // Same forcing technique as the "invalid-markup case" test above:
+      // temporarily makes _getMarkupForTimezone() return unparseable
+      // markup so _updateLabel() takes its real plain-text fallback
+      // branch, which calls the REAL _getLabelForTimezone({ item }) (no
+      // `full`) for every zone -- this IS "buildEntryText's panel usage"
+      // from the design brief, and is the one call site that could leak
+      // the date into the panel if the `full` check in
+      // _getLabelForTimezone() were ever removed/weakened (proven by
+      // temporarily removing it during verification of this test, see the
+      // PR/task report).
+      const originalGetMarkup = inst._getMarkupForTimezone.bind(inst);
+      inst._getMarkupForTimezone = () => '<b>unterminated MUTATION-STYLE invalid markup';
+      inst._label.clutter_text.set_markup('<b>SENTINEL-BEFORE-DATE-FALLBACK-TEST-' + GLib.get_monotonic_time() + '</b>');
+
+      try {
+        inst._updateLabel();
+      } finally {
+        inst._getMarkupForTimezone = originalGetMarkup;
+        inst._lastMarkupFailureLogTime = undefined;
+      }
+
+      const fallbackText = inst._label.text;
+      assertTrue(inst._label.clutter_text.get_use_markup() === false, 'expected the plain-text fallback to have actually engaged for this test to be meaningful');
+      assertFalse(/\(\d/.test(fallbackText), `expected no date addendum in the plain-text PANEL FALLBACK even with Show date ON: ${JSON.stringify(fallbackText)}`);
+
+      inst._label.text = 'SENTINEL-AFTER-DATE-FALLBACK-TEST-' + GLib.get_monotonic_time();
+      inst._updateLabel(); // restore real, valid rendering before later tests run
+    });
+
+    record('date feature: changing the real "date-format" gsetting to a different curated id changes the rendered row', () => {
+      inst._settings.set_string('date-format', 'iso');
+      inst._loadSettings(); // real settings-change pickup, mirrors the 'changed' listener's own call
+      inst._updateMenu();
+      const text = findActiveRowLabelText('UTC');
+      assertTrue(!!text, 'could not find the real UTC row to read its text from');
+
+      const glibTz = GLib.TimeZone.new('UTC');
+      const now = GLib.DateTime.new_now(glibTz);
+      // ISO 8601 date, e.g. "2026-07-20" -- a real, discriminating shape
+      // check distinct from the locale-default format asserted just above.
+      assertTrue(/\(\d{4}-\d{2}-\d{2}\)/.test(text), `expected an ISO-shaped "(YYYY-MM-DD)" date in the row text after switching to the "iso" format: ${JSON.stringify(text)}`);
+    });
+
+    record('date feature: turning "Show date" back OFF removes the date from the real menu row again (round-trip)', () => {
+      const entry = inst._configSwitches.showDate;
+      entry.item.toggle();
+      assertTrue(entry.getValue() === false, 'toggling "Show date" back off did not flip its stored value');
+      inst._updateMenu();
+      const text = findActiveRowLabelText('UTC');
+      assertTrue(!!text, 'could not find the real UTC row to read its text from');
+      assertFalse(/\(\d{4}-\d{2}-\d{2}\)/.test(text), `expected the date addendum to be gone again after turning Show date off: ${JSON.stringify(text)}`);
+    });
 
     // =====================================================================
     // 4. Drag-and-drop: driving the reorder LOGIC directly (pointer DnD

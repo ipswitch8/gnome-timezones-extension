@@ -231,6 +231,7 @@ globalThis.__TZ_SCHEMA_ID__ = SCHEMA_ID;
 
 const { default: TimezonesPrefs } = await import(`file://${REPO_DIR}/prefs.js`);
 const { DEFAULT_FORMATTING, serializeFormatting, parseFormatting, rgbaToHex } = await import(`file://${REPO_DIR}/formatting.js`);
+const { DATE_FORMATS, DEFAULT_DATE_FORMAT_ID } = await import(`file://${REPO_DIR}/dateFormats.js`);
 
 function newSettings() {
   const source = Gio.SettingsSchemaSource.new_from_directory(SCHEMA_DIR, Gio.SettingsSchemaSource.get_default(), false);
@@ -281,6 +282,9 @@ function expectedWidgetNamesFor(zones) {
     'tzprefs-page',
     'tzprefs-defaults-group',
     'tzprefs-separator',
+    'tzprefs-show-date',
+    'tzprefs-date-format',
+    'tzprefs-date-format-custom',
     'tzprefs-global-size',
     'tzprefs-global-color-row',
     'tzprefs-global-color',
@@ -323,6 +327,8 @@ const KNOWN_ZONES = ['UTC', 'America/Los_Angeles'];
   const beforeDefaults = settings.get_string('formatting-defaults');
   const beforeFormatting = settings.get_value('formatting').deep_unpack();
   const beforeTimezones = settings.get_strv('timezones');
+  const beforeDateFormat = settings.get_string('date-format');
+  const beforeConfig = settings.get_value('config').deep_unpack();
 
   const prefsObj = new TimezonesPrefs();
   prefsObj.getSettings = () => settings;
@@ -345,6 +351,13 @@ const KNOWN_ZONES = ['UTC', 'America/Los_Angeles'];
     assertEqual(settings.get_string('formatting-defaults'), beforeDefaults, 'formatting-defaults');
     assertEqual(settings.get_value('formatting').deep_unpack(), beforeFormatting, 'formatting');
     assertEqual(settings.get_strv('timezones'), beforeTimezones, 'timezones');
+    // Date feature additions: zero-interaction must also leave the new
+    // 'date-format' key AND the 'config' key (holding "Show date") alone --
+    // both are newly-touchable by this file as of this feature, so this
+    // guarantee is worth asserting explicitly, not just assumed to be
+    // covered by the pre-existing keys above.
+    assertEqual(settings.get_string('date-format'), beforeDateFormat, 'date-format');
+    assertEqual(settings.get_value('config').deep_unpack(), beforeConfig, 'config');
   });
 }
 
@@ -441,6 +454,105 @@ const KNOWN_ZONES = ['UTC', 'America/Los_Angeles'];
     assertEqual(boldCity.active, globalDefaults.boldCity, 'LA boldCity should match the global default');
     assertEqual(boldTime.active, globalDefaults.boldTime, 'LA boldTime should match the global default (true) -- DEFAULT_FORMATTING would wrongly show false');
     assertEqual(boldZone.active, globalDefaults.boldZone, 'LA boldZone should match the global default');
+  });
+}
+
+// =====================================================================
+// Suite 1c: date controls ("Show date" switch, the curated date-format
+// ComboRow, and the free-form custom EntryRow) -- initial displayed
+// values for both a curated stored id and a custom/literal stored value,
+// plus real interactions on each control.
+// =====================================================================
+
+{
+  const settings = newSettings();
+  settings.set_strv('timezones', KNOWN_ZONES);
+  settings.set_value('config', new GLib.Variant('a{sb}', { format24: true, showCity: true, showTimezone: false, hideSystemClock: false, showSeparator: false, showDate: true }));
+  settings.set_string('date-format', 'iso'); // a curated id
+
+  const prefsObj = new TimezonesPrefs();
+  prefsObj.getSettings = () => settings;
+  const window = new Adw.PreferencesWindow();
+  prefsObj.fillPreferencesWindow(window);
+
+  test('"Show date" SwitchRow displays the current config.showDate value (true)', () => {
+    const widget = findByName(window, 'tzprefs-show-date');
+    assertTrue(widget !== null, 'tzprefs-show-date not found');
+    assertEqual(widget.active, true, 'Show date switch should display true');
+  });
+
+  test('date-format ComboRow preselects the curated entry matching the stored id ("iso")', () => {
+    const widget = findByName(window, 'tzprefs-date-format');
+    assertTrue(widget !== null, 'tzprefs-date-format not found');
+    const isoIndex = DATE_FORMATS.findIndex((e) => e.id === 'iso');
+    assertEqual(widget.selected, isoIndex, 'ComboRow should preselect the "iso" entry');
+  });
+
+  test('custom date-format EntryRow is EMPTY when the stored value is a curated id, not the literal id string', () => {
+    const widget = findByName(window, 'tzprefs-date-format-custom');
+    assertTrue(widget !== null, 'tzprefs-date-format-custom not found');
+    assertEqual(widget.text, '', 'custom entry should be empty for a curated stored id');
+  });
+
+  test('toggling the real "Show date" switch writes config.showDate and NOT date-format/formatting-defaults', () => {
+    const widget = findByName(window, 'tzprefs-show-date');
+    widget.active = false;
+    const config = settings.get_value('config').deep_unpack();
+    assertEqual(config.showDate, false, 'config.showDate should now be false');
+    assertEqual(settings.get_string('date-format'), 'iso', 'date-format must be untouched by the Show date switch');
+  });
+
+  test('selecting a different curated entry on the real ComboRow writes its id to date-format', () => {
+    const widget = findByName(window, 'tzprefs-date-format');
+    const weekdayIndex = DATE_FORMATS.findIndex((e) => e.id === 'weekday');
+    assertTrue(weekdayIndex >= 0, 'test setup problem: "weekday" entry not found');
+    widget.selected = weekdayIndex;
+    assertEqual(settings.get_string('date-format'), 'weekday', 'date-format should now be "weekday"');
+  });
+
+  test('typing a literal pattern into the real custom EntryRow writes it verbatim to date-format, overriding the ComboRow pick', () => {
+    const widget = findByName(window, 'tzprefs-date-format-custom');
+    widget.text = '%G-W%V';
+    assertEqual(settings.get_string('date-format'), '%G-W%V', 'date-format should now be the literal custom pattern');
+  });
+
+  test('clearing the custom EntryRow back to empty does NOT write an empty date-format (leaves the last real value in place)', () => {
+    const widget = findByName(window, 'tzprefs-date-format-custom');
+    widget.text = '';
+    assertEqual(settings.get_string('date-format'), '%G-W%V', 'date-format should still hold the last non-empty custom value');
+  });
+}
+
+// =====================================================================
+// Suite 1d: a PRE-EXISTING custom/literal date-format value (not a
+// curated id) must show up verbatim in the custom EntryRow, and the
+// ComboRow must fall back to displaying the curated default rather than
+// silently resolving to index 0 for an unrelated reason.
+// =====================================================================
+
+{
+  const settings = newSettings();
+  settings.set_strv('timezones', KNOWN_ZONES);
+  settings.set_string('date-format', '%d.%m.%Y'); // literal, not a curated id
+
+  const prefsObj = new TimezonesPrefs();
+  prefsObj.getSettings = () => settings;
+  const window = new Adw.PreferencesWindow();
+  prefsObj.fillPreferencesWindow(window);
+
+  test('custom date-format EntryRow displays the PRE-EXISTING literal value verbatim', () => {
+    const widget = findByName(window, 'tzprefs-date-format-custom');
+    assertEqual(widget.text, '%d.%m.%Y', 'custom entry should show the stored literal pattern');
+  });
+
+  test('date-format ComboRow falls back to the curated DEFAULT_DATE_FORMAT_ID for a non-curated stored value', () => {
+    const widget = findByName(window, 'tzprefs-date-format');
+    const defaultIndex = DATE_FORMATS.findIndex((e) => e.id === DEFAULT_DATE_FORMAT_ID);
+    assertEqual(widget.selected, defaultIndex, 'ComboRow should fall back to the curated default entry');
+  });
+
+  test('opening prefs with a pre-existing literal date-format and touching nothing does not overwrite it', () => {
+    assertEqual(settings.get_string('date-format'), '%d.%m.%Y', 'date-format must be unchanged by construction alone');
   });
 }
 

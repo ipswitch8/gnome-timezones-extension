@@ -27,5 +27,10 @@
       <summary>Global default text formatting</summary>
       <description>A single JSON-encoded object of the same shape as the values in "formatting" ({"size": &lt;int pt or 0=inherit&gt;, "color": "#rrggbb" or "", "boldCity": bool, "boldTime": bool, "boldZone": bool}), used as the fallback for any zone without a per-entry override in "formatting". An empty string means no defaults are set and the current appearance is preserved.</description>
     </key>
+    <key name="date-format" type="s">
+      <default>""</default>
+      <summary>Date format shown for each timezone in the popup menu</summary>
+      <description>A single, GLOBAL (not per-zone) date format applied to every timezone's popup-menu row when the "Show date" option is enabled. Either one of the curated ids from dateFormats.js's DATE_FORMATS list (e.g. "iso"), or a free-form literal GLib.DateTime.format() pattern (e.g. "%Y-%m-%d") typed/chosen directly, dconf-writable like every other key here. An empty string means "use the curated default format" (locale-appropriate, dateFormats.js's DEFAULT_DATE_FORMAT_ID).</description>
+    </key>
   </schema>
 </schemalist>
