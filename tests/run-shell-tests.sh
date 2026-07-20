@@ -216,7 +216,7 @@ mkdir -p "$EXT_DIR" "$DRV_DIR"
 # see extension.js's comment on the this._separatorMenuItems field in the
 # constructor for the full history). Copying a file the extension doesn't
 # ship would silently diverge this sandbox from a real install.
-for f in extension.js formatting.js separators.js dateFormats.js timezones.js cityAliases.js metadata.json; do
+for f in extension.js formatting.js separators.js dateFormats.js hoverPopup.js timezones.js cityAliases.js metadata.json; do
   cp "$REPO_ROOT/$f" "$EXT_DIR/" || { echo "FATAL: failed to copy $f into sandbox"; exit 1; }
 done
 cp -r "$REPO_ROOT/schemas" "$EXT_DIR/schemas" || { echo "FATAL: failed to copy schemas/ into sandbox"; exit 1; }

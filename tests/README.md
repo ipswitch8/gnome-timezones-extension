@@ -389,6 +389,14 @@ for how it works.
   hostile payloads (proving Pango treats them as inert text, not just
   that the assembled string looks escaped) and a full write-path ->
   GSettings -> read-path pipeline test.
+- `hoverPopup.js`'s pure row-selection-and-ordering logic
+  (`run-tests.js`): exact `_activeOrder` ordering (not membership-only,
+  not alphabetical), reflecting a reorder, custom-label handling, the
+  always-appended date segment via the real `resolveDateFormat()`/
+  `formatDateForDisplay()`, skipping stale/unknown zone ids, and that a
+  hostile label survives completely verbatim (this module never escapes
+  anything -- see its own module comment for why that is correct, not a
+  gap).
 - `prefs.js`'s real widget tree: construction, the exact `tzprefs-*`
   widget-name set, zero-write-on-open, per-zone override
   seeding/isolation/read-modify-write, "Clear override", and unknown/
@@ -717,6 +725,140 @@ Covered:
   is verified at the JS-bookkeeping level plus the source fact that
   `disable()` unconditionally disconnects it before nulling it, rather
   than via `g_signal_handler_is_connected()`.)
+- **Hover popup ("Show all zones on hover")**: the pure row-selection-
+  and-ordering logic (`hoverPopup.js`'s `buildHoverPopupRows()`/
+  `buildHoverPopupRowText()`) is covered independently by `run-tests.js`
+  (see below); this shell driver covers everything that logic alone
+  cannot -- the real actor/signal/timer plumbing in `extension.js`:
+  - **Content and exact order**: with the toggle ON, `_showHoverPopup()`
+    builds one plain-text row per zone in `_activeOrder`, in that EXACT
+    order (asserted by index, not just membership), each containing its
+    city/label, zone abbreviation, time, and date (reusing the real
+    `date-format` gsetting/`resolveDateFormat()`/`formatDateForDisplay()`
+    machinery -- the same ISO-shape check the date-feature section above
+    uses). A real `_reorderActiveZone()` call is proven to change the
+    order on the NEXT show, then the order is restored for the DnD
+    section that follows.
+  - **Plain-text-only, never markup**: a hostile per-zone label
+    (`<b>evil</b> & "quotes"`) survives completely verbatim in a row's
+    `.text`, and `clutter_text.get_use_markup()` is confirmed `false` for
+    that row -- proving this popup never touches the markup surface at
+    all (see `hoverPopup.js`'s own module comment for why that is a
+    deliberate design choice, not an oversight).
+  - **Lazy by design -- inert when disabled (karen-gate finding)**: with
+    the toggle off (the schema default), this extension must add
+    *nothing* to `Main.layoutManager.uiGroup` and connect *nothing* to
+    `this._button` -- byte-identical to a build with no hover-popup
+    feature at all. This is now an asserted property, not an assumption:
+    `enable()` with the toggle untouched leaves `_hoverPopup`/
+    `_hoverPopupBox`/`_hoverSignalId`/`_hoverShowTimeoutId` all `null`,
+    `Main.layoutManager.uiGroup`'s child COUNT unchanged from a baseline
+    captured right before this section (not just a falsy-field check --
+    a leaked *other* actor would not be caught by that), and no actor
+    anywhere in `uiGroup` carries this feature's own `accessible_name`.
+    Calling the real show path (`_showHoverPopup()`) with the toggle off
+    is a harmless no-op (no actor is created as a side effect, confirmed
+    not to throw). Toggling the real switch ON is proven to lazily
+    CREATE the popup actor (a real child of `uiGroup`) and connect
+    `notify::hover` (`g_signal_handler_is_connected()`, not just a
+    JS-field check); toggling it back OFF is proven to lazily DESTROY the
+    same actor and disconnect the same real signal id -- with
+    `g_signal_handler_is_connected()` confirming the disconnection and a
+    `uiGroup` membership check confirming the actor is gone, not just
+    that the JS fields were reassigned. Toggling ON/OFF/ON/OFF/ON five
+    times in a row is confirmed to create a genuinely FRESH actor and
+    signal id every time (never reusing/resurrecting a destroyed one) and
+    to leave `uiGroup`'s child count back at its pre-cycle value after
+    every OFF. An EXTERNAL settings change -- a direct `GSettings` write
+    simulating `dconf`/another instance of this same extension, not the
+    menu switch -- is proven to drive the exact same lazy create/destroy
+    through the `changed` handler. Finally, `disable()` after a session
+    that never touches the toggle at all (the popup genuinely never
+    created) is confirmed to run cleanly with no errors and no change to
+    `uiGroup`'s child count -- `_teardownHoverPopup()` (the single
+    teardown implementation both `disable()` and the lazy toggle-off path
+    share) is a true no-op when there is nothing to tear down.
+  - **Rendering, not just object graph**: after a real show, both the
+    popup actor and its first row are confirmed `mapped === true` with a
+    real, finite, positive `get_allocation_box()` -- the same class of
+    check that catches the "empty submenu"/NaN-allocation bug class this
+    project has hit before (see the karen-gate history on
+    `this._separatorMenuItems` in `extension.js`).
+  - **Suppression, both directions**: with the real main menu open,
+    `_showHoverPopup()` does not display the popup; opening the real main
+    menu WHILE the hover popup is showing hides it (via the real,
+    extended `open-state-changed` handler).
+  - **Timer discipline**: scheduling then cancelling removes the pending
+    `GLib.timeout_add()` source, verified via
+    `GLib.MainContext.default().find_source_by_id()` -- a real GLib-level
+    proof, not just a nulled JS field (the same standard
+    `g_signal_handler_is_connected()` sets for signals elsewhere in this
+    driver); a cancelled timer is confirmed to never show the popup even
+    after the real delay elapses; a timer genuinely PENDING at the exact
+    moment `disable()` runs is confirmed gone afterward, and the same is
+    re-checked across three further enable/disable cycles with no
+    accumulation.
+  - **The real `notify::hover` GObject signal, end to end**: setting
+    `this._button.hover = true` (a real GObject property write -- what
+    `track_hover` would flip on a genuine pointer enter) is proven to
+    schedule the real timer and, after the real
+    `HOVER_POPUP_SHOW_DELAY_MS` delay elapses, show the real popup;
+    setting it back to `false` is proven to cancel any pending timer and
+    hide the popup.
+  - **Teardown**: the panel button's `notify::hover` handler is confirmed
+    connected before `disable()` (a real, positive `g_signal_handler_is_
+    connected()` reading on the still-live button); every hover-related
+    field (`_hoverPopup`, `_hoverPopupBox`, `_hoverShowTimeoutId`,
+    `_hoverSignalId`) is confirmed nulled after `disable()`; the hover
+    popup actor is confirmed no longer a child of
+    `Main.layoutManager.uiGroup` (a reference-identity check against a
+    snapshot taken while it was still live -- never a method call on the
+    destroyed actor itself, see the karen-gate fix below). Deliberately
+    NOT verified via a post-`disable()`
+    `GObject.signal_handler_is_connected()` call on the button itself --
+    see the karen-gate fix note immediately below for why.
+
+  **KAREN-GATE FIX**: an earlier version of this section's teardown
+  check DID call `GObject.signal_handler_is_connected()` on the button
+  AFTER `disable()`, and produced a real `Gjs-CRITICAL **: Object
+  .Gjs_ui_panelMenu_PanelMenuButton ... has been already disposed --
+  impossible to access it` on every run, caught by the generalized
+  shell-log scanner (finding 3 below) rather than by the assertion
+  itself, which "passed" by returning a falsy read off a disposed
+  object -- not a real proof of anything. Unlike `this._systemClock`/
+  `this._settings` (never destroyed, only disconnected-from),
+  `this._button` IS genuinely destroyed by `disable()` itself, so this is
+  the exact same disposed-object-access class of bug a previous karen
+  gate already found and fixed once in this file's pre-existing
+  "unparented" teardown test (which reads a STABLE ANCESTOR's child count
+  instead of touching the destroyed button, see that test's own comment).
+  **Fixed** the same way: the post-`disable()` check on the button was
+  removed, and the guarantee is instead verified via (1) a PRE-disable
+  `g_signal_handler_is_connected()` reading (proves the signal genuinely
+  WAS connected on the live object, not a vacuous "never connected"
+  pass), (2) the nulled-field check, and (3) the source-level fact that
+  `disable()` unconditionally calls `this._button.disconnect(this._
+  hoverSignalId)` before `this._button.destroy()` -- the same boundary
+  this file already used for `_labelStyleChangedId` (connected to the
+  equally-destroyed `this._label`). Proven to genuinely discriminate: the
+  disposed-object read is gone from every run (confirmed via a clean
+  shell-log scan across all four resolutions), and the pre-disable
+  connectedness check still fails loudly if the signal is ever connected
+  too late or not at all.
+
+  **Remains manual-only, same boundary as pointer-driven DnD below**: a
+  real physical mouse cursor entering the panel button and genuinely
+  triggering `track_hover`/`notify::hover` cannot be synthesized
+  headlessly in this environment (no working synthetic pointer-motion
+  path -- see the AT-SPI investigation above). Every driven test in this
+  section instead sets the real `this._button.hover` GObject property
+  directly (or calls `_showHoverPopup()`/`_scheduleHoverPopupShow()`
+  directly for more targeted checks) to exercise the same real, connected
+  signal handler end to end -- real code, real signal emission, real
+  timer, real actor, just not triggered by a real cursor movement.
+  "Hovering with an actual mouse triggers this popup" is therefore
+  unverified by any committed test, exactly like real pointer-driven
+  drag-and-drop below.
 - The whole run's shell log is scanned for `JS ERROR`/`JS WARNING`/
   `Clutter-WARNING` markup-failure lines anywhere in it (no path-based
   attribution filter -- see finding 3 above for why); any hit fails the
@@ -815,6 +957,13 @@ dedicated coverage list above -- no longer manual-only:**
   three further enable/disable cycles.
 
 **Remain manual-only (not exercised by any committed test):**
+- A real physical mouse cursor entering the panel button and genuinely
+  triggering the hover popup via `track_hover`/`notify::hover` (as
+  opposed to setting the real `this._button.hover` GObject property
+  directly, or calling `_showHoverPopup()`/`_scheduleHoverPopupShow()`
+  directly, both of which drive the same real, connected production code
+  and are committed and machine-verified -- see the "Hover popup" bullet
+  above).
 - Real pointer-driven drag-and-drop (as opposed to the reorder logic
   above, which is committed and machine-verified).
 - A real synthesized-keyboard (`Return` keypress) inline-rename commit
@@ -831,3 +980,76 @@ dedicated coverage list above -- no longer manual-only:**
   string/`Pango.parse_markup()` level (`run-tests.js`) plus "Clutter/Pango
   accepted this real markup without throwing or falling back, in a real
   shell process" (`run-shell-tests.sh`).
+
+## Unreproduced flake: "three further enable/disable cycles" (2026-07-20)
+
+During a full four-resolution matrix sweep of the hover-popup feature,
+the shell-driver assertion **"teardown: three further enable/disable
+cycles stay clean and reusable, with no accumulating signal leaks"**
+(`tests/shell-driver/extension.js`) failed **exactly once**. The failure
+was never captured in detail (no shell-log snapshot was retained from
+that run), so neither the specific sub-assertion inside the loop nor the
+exact error text is recorded here -- only that this was the test that
+failed, and that it did not recur.
+
+**Measurement, not a guess:** the same assertion, and the same full
+matrix sweep, were re-run 78 further times chasing a reproduction:
+- 40 standalone runs at 1024x768: 0 failures.
+- 26 standalone runs at 1280x720: 0 failures.
+- 3 consecutive full four-resolution matrix sweeps (12 launches total --
+  the exact condition it originally failed under): 0 failures.
+
+Total: 78 runs, 0 reproductions. The cause was never identified. This is
+recorded as a known unknown, not a fixed bug -- if this exact assertion
+ever fails again, that is not necessarily a new regression; check this
+note first.
+
+**What was done about it anyway:** the most plausible mechanism --
+`disable()` landing at an unlucky moment in the hover-popup lifecycle
+(mid-show-schedule, mid-show, mid-hide) and leaving a `GLib` timeout or a
+`notify::hover` connection live -- was audited directly against
+`extension.js`'s `disable()`. The teardown was found to **already be
+safe by construction**: GJS/Clutter run a single-threaded main loop, so
+`disable()` (itself always synchronous, no `await` anywhere inside it)
+can never truly interleave with a `GLib` timeout callback or a
+`notify::hover` handler's own execution -- only ever run strictly before
+or after one. `disable()` cancels the pending show-timer
+(`GLib.Source.remove()`, only ever reached before the callback's own
+dispatch) and disconnects `notify::hover` before destroying anything, so
+neither can fire once teardown has begun; and `_showHoverPopup()`/
+`_onButtonHoverChanged()` independently null-check every field they
+touch, so even a hypothetical future refactor that broke that ordering
+would degrade to a safe no-op rather than a crash. No code in
+`extension.js` was changed as a result of this audit -- there was no
+genuine defect to fix in the teardown ordering itself.
+
+The three awkward interleavings (disable() with a show-timer pending,
+disable() while the popup is genuinely showing, disable() shortly after
+a hide) are now covered by dedicated shell-driver tests ("hover teardown
+interleaving A/B/C", plus a fourth proving the timeout-callback body and
+the `notify::hover` handler are harmless if invoked directly right after
+`disable()`) -- precautionary hardening of the test suite, not a fix for
+a diagnosed cause, since no cause was ever diagnosed.
+
+**One real, unrelated thing this investigation did find and root-cause,
+recorded here for anyone who greps this file after seeing a similar
+`Gjs-CRITICAL` line:** destroying a real `BoxPointer` in the *exact same*
+synchronous JS turn as its own `open()` call -- i.e. zero mainloop turns
+elapsed -- can produce a genuine `Gjs-CRITICAL: Object
+.Gjs_ui_boxpointer_BoxPointer ..., has been already disposed` from GNOME
+Shell's own `Main.layoutManager` machinery (a `Meta.later_add()`-scheduled
+callback queued for the next frame). This was root-caused by matching
+the disposed object's address, hex-for-hex, against a debug probe logging
+`this._hoverPopup`'s own address at creation and destruction, and
+confirmed to reproduce identically against a completely **unmodified**
+`extension.js` (plain `this._hoverPopup.destroy()`, no changes at all) --
+proving it is a GNOME-Shell-internal, same-tick scheduling artifact, not
+a defect in this extension's teardown. It is also not reachable by any
+real `disable()`: GNOME Shell's `ExtensionManager` only ever invokes
+`disable()` in response to an external event (a D-Bus call, a keybinding,
+session lock) -- inherently a separate mainloop turn from whatever caused
+the popup to be showing, so at least one real turn has always already
+elapsed by the time a genuine `disable()` runs. The "interleaving B/C"
+tests mentioned above use a short, explicitly-commented settle for
+exactly this reason, reproducing the minimum realistic gap rather than an
+unreachable same-tick race.

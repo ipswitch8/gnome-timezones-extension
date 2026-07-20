@@ -1475,6 +1475,444 @@ export default class ShellTestDriver extends Extension {
       assertFalse(/\(\d{4}-\d{2}-\d{2}\)/.test(text), `expected the date addendum to be gone again after turning Show date off: ${JSON.stringify(text)}`);
     });
 
+    // LAZY HOVER POPUP baseline (karen-gate finding): captured HERE,
+    // right before section 3d's own tests -- NOT immediately after
+    // enable() (measured directly: capturing it that early is
+    // contaminated by GNOME Shell's own dateMenu warm-up a few tests
+    // above, which lazily adds ITS OWN chrome to uiGroup the first time
+    // any BoxPointer opens in this process, entirely unrelated to this
+    // extension -- an earlier version of this baseline capture false-
+    // failed for exactly that reason). By this point every earlier
+    // section's one-time uiGroup-affecting setup has already happened,
+    // and showHoverPopup is still false (schema default, never touched
+    // yet), so this count reflects EXACTLY what a toggle-off state adds
+    // to the real Main.layoutManager.uiGroup -- the same uiGroup state
+    // HEAD (no hover-popup feature at all) would produce from this point
+    // on. The "off by default" test below compares against this real
+    // captured number rather than only asserting `inst._hoverPopup` is
+    // falsy -- a leaked OTHER actor would not be caught by a falsy check
+    // on our own field, but would move this count.
+    const uiGroupChildCountAtEnable = Main.layoutManager.uiGroup.get_children().length;
+
+    // =====================================================================
+    // 3d. Hover popup ("Show all zones on hover"): the harness cannot
+    // synthesize real pointer-enter input (see the module doc comment and
+    // tests/README.md's "Verification coverage" section -- the same
+    // established limitation as pointer-driven DnD/AT-SPI input below),
+    // so "hovering the mouse actually triggers this" is manual-only. Every
+    // other real code path IS driven directly here: the real
+    // this._button.hover GObject property (which real driver a physical
+    // pointer enter would flip, via track_hover -- see panelMenu.js's
+    // Button._init()) is set directly to fire the real, connected
+    // 'notify::hover' handler end-to-end; _showHoverPopup()/
+    // _hideHoverPopup()/_scheduleHoverPopupShow()/
+    // _cancelHoverPopupShowTimeout() are called directly where a more
+    // targeted assertion needs to bypass the real show-delay.
+    //
+    // Coming into this section: inst._activeOrder === ['UTC',
+    // 'America/New_York'] (see the "setup: activate a second zone" test
+    // above) and inst._config.showHoverPopup === false (schema default,
+    // never touched by any earlier section). Every test below that
+    // reorders inst._activeOrder restores it to EXACTLY
+    // ['UTC', 'America/New_York'] before this section ends, since the DnD
+    // section immediately below hard-codes that starting order.
+    // =====================================================================
+
+    record('hover popup: "Show all zones on hover" is off by default (in-memory), and its popup-menu switch is tracked', () => {
+      assertTrue(inst._config.showHoverPopup === false, 'showHoverPopup should default to false');
+      assertTrue(!!inst._configSwitches.showHoverPopup, 'no "showHoverPopup" config switch tracked -- the popup menu switch was not added');
+
+      // LAZY HOVER POPUP (karen-gate finding): with the toggle off, this
+      // extension must be inert -- no hover-popup actor, no 'notify::hover'
+      // connection, no pending timer -- exactly what HEAD (no hover-popup
+      // feature at all) produces. Field-level checks first (cheap, precise
+      // about WHICH thing is missing if this ever regresses)...
+      assertTrue(inst._hoverPopup === null, 'a hover-popup actor exists with the toggle off -- the popup must be created lazily, only when toggled on');
+      assertTrue(inst._hoverPopupBox === null, 'a hover-popup row container exists with the toggle off');
+      assertTrue(inst._hoverSignalId === null, 'a "notify::hover" connection exists with the toggle off -- must only connect when the popup is created');
+      assertTrue(inst._hoverShowTimeoutId === null, 'a hover-show timer is scheduled with the toggle off');
+      // ...then the REAL, GObject/Clutter-level proof that would catch a
+      // leak even if some OTHER field pointed at the actor (the exact gap
+      // the coordinator's finding identified: nothing previously asserted
+      // uiGroup child count or signal absence with the toggle off). Two
+      // independent checks: the uiGroup child COUNT must be back to
+      // exactly what it was right after enable() (before this test, or
+      // any other, ever touched the toggle) -- proving no actor was added
+      // AT ALL, not just that our own field doesn't reference one -- and
+      // no actor anywhere in uiGroup carries this feature's own
+      // accessible_name, a second, independent way of proving the same
+      // "nothing was added" fact.
+      assertEqual(
+        Main.layoutManager.uiGroup.get_children().length,
+        uiGroupChildCountAtEnable,
+        'Main.layoutManager.uiGroup has a different child count than right after enable() -- something was added to the real actor tree with the hover-popup toggle off'
+      );
+      assertFalse(
+        Main.layoutManager.uiGroup.get_children().some((child) => child.accessible_name === 'Timezones hover popup'),
+        'a real actor with the hover-popup\'s own accessible_name is a child of uiGroup with the toggle off'
+      );
+      // A real, id-based g_signal_handler_is_connected() proof of
+      // "notify::hover" absence needs an id to check against -- there
+      // isn't one right now (inst._hoverSignalId is null, precisely the
+      // point). The "toggling ON"/"toggling OFF" tests below supply that
+      // proof at the moment a real id DOES exist to check: connected
+      // right after toggling on, confirmed disconnected (same id) right
+      // after toggling back off.
+      // Deliberately does NOT assert that 'showHoverPopup' is absent
+      // (undefined) from the persisted 'config' gsetting at this point.
+      // DIAGNOSIS (an earlier version of this test asserted exactly that,
+      // and failed): _saveSettings() writes `this._config` VERBATIM --
+      // every key in CONFIG_KEYS, including showHoverPopup -- on every
+      // single save (see extension.js's own _saveSettings():
+      // `this._settings.set_value('config', new GLib.Variant('a{sb}',
+      // this._config))`, no per-key diffing). By the time this section
+      // runs, the "date feature" section above has already toggled the
+      // real "Show date" switch multiple times, and EVERY one of those
+      // toggles triggers a real _saveSettings() call that writes the
+      // WHOLE config object -- including showHoverPopup: false -- to
+      // gsettings. That is correct, pre-existing, intentional product
+      // behavior (not something this feature changed or should change),
+      // so asserting "not yet persisted" was a false premise created by
+      // test ORDERING, not a real product guarantee -- this is a shared
+      // 'config' a{sb} key, not a per-feature key, so no switch's
+      // "freshness" can be assumed once ANY switch anywhere has ever been
+      // toggled in this same run. The genuinely meaningful, ORDER-
+      // independent guarantee -- "if this key HAS been persisted by now,
+      // it must still be false, never true, since this test never
+      // toggled it itself" -- is what's actually asserted below.
+      const configVariant = inst._settings.get_value('config').deep_unpack();
+      if (Object.prototype.hasOwnProperty.call(configVariant, 'showHoverPopup')) {
+        assertTrue(configVariant.showHoverPopup === false, 'if showHoverPopup has already been persisted by an earlier save in this run, it must still be false (never true) before this section\'s own toggle test below');
+      }
+    });
+
+    record('hover popup: with the toggle OFF, invoking the real show path (_showHoverPopup()) is a harmless no-op -- with the lazy design there is no popup actor to build rows into or show at all', () => {
+      assertTrue(inst._hoverPopup === null, 'popup should not exist before this test (setup problem)');
+      let threw = null;
+      try {
+        inst._showHoverPopup();
+      } catch (e) {
+        threw = e;
+      }
+      assertTrue(threw === null, `_showHoverPopup() with the toggle off (no popup actor) threw: ${threw}`);
+      assertTrue(inst._hoverPopup === null, '_showHoverPopup() with the toggle off must not create a popup actor as a side effect');
+    });
+
+    record('hover popup: toggling the real "Show all zones on hover" switch writes config.showHoverPopup, NOT date-format/formatting-defaults/separator, and lazily CREATES the popup actor + notify::hover connection', () => {
+      const entry = inst._configSwitches.showHoverPopup;
+      const beforeDateFormat = inst._settings.get_string('date-format');
+      const beforeSeparator = inst._settings.get_string('separator');
+      const beforeFormattingDefaults = inst._settings.get_string('formatting-defaults');
+      assertTrue(inst._hoverPopup === null, 'popup should not exist before toggling on (test setup problem)');
+
+      entry.item.toggle(); // real PopupSwitchMenuItem method -> real 'toggled' handler -> real setValue -> real _syncHoverPopupLifecycle()
+
+      assertTrue(entry.getValue() === true, 'toggling did not flip its stored value');
+      assertTrue(inst._settings.get_value('config').deep_unpack().showHoverPopup === true, 'the real "config" gsetting does not have showHoverPopup=true after toggling');
+      assertEqual(inst._settings.get_string('date-format'), beforeDateFormat, 'date-format must be untouched by the hover-popup switch');
+      assertEqual(inst._settings.get_string('separator'), beforeSeparator, 'separator must be untouched by the hover-popup switch');
+      assertEqual(inst._settings.get_string('formatting-defaults'), beforeFormattingDefaults, 'formatting-defaults must be untouched by the hover-popup switch');
+
+      // LAZY CREATE (karen-gate finding): toggling ON must actually build
+      // the popup actor and connect notify::hover -- not just flip the
+      // stored boolean. Real, GObject/Clutter-level proof, not just a
+      // JS-field-is-truthy check: the actor is a genuine child of
+      // Main.layoutManager.uiGroup, and g_signal_handler_is_connected()
+      // confirms the REAL signal connection (same rigour the teardown
+      // section already uses for WallClock/GSettings/button signals).
+      assertTrue(!!inst._hoverPopup, 'toggling on did not create the popup actor');
+      assertTrue(!!inst._hoverPopupBox, 'toggling on did not create the popup row container');
+      assertTrue(!!inst._hoverSignalId, 'toggling on did not connect notify::hover');
+      assertTrue(
+        Main.layoutManager.uiGroup.get_children().includes(inst._hoverPopup),
+        'the newly-created popup actor is not a real child of Main.layoutManager.uiGroup'
+      );
+      assertTrue(
+        GObject.signal_handler_is_connected(inst._button, inst._hoverSignalId),
+        'the real "notify::hover" signal is not connected after toggling on (JS field is set, but the GObject-level connection is missing)'
+      );
+    });
+
+    record('hover popup: with the toggle ON, the real show path builds a row for every active zone, in EXACT _activeOrder order (not just membership)', () => {
+      assertEqual(inst._activeOrder, ['UTC', 'America/New_York'], 'test setup problem: unexpected _activeOrder going into this test');
+      inst._settings.set_string('date-format', 'iso');
+      inst._loadSettings();
+
+      inst._showHoverPopup();
+
+      const rowTexts = inst._hoverPopupBox.get_children().map((c) => c.text);
+      assertEqual(rowTexts.length, 2, `expected exactly 2 rows, got ${rowTexts.length}`);
+      assertTrue(rowTexts[0].startsWith('UTC'), `expected row 0 to start with "UTC" (activeOrder[0]): ${JSON.stringify(rowTexts)}`);
+      assertTrue(rowTexts[1].includes('America/New_York'), `expected row 1 to reference America/New_York (activeOrder[1]): ${JSON.stringify(rowTexts)}`);
+      // Real date-format machinery reused, not a second implementation --
+      // same ISO-shape check the date-feature section above uses.
+      assertTrue(/\(\d{4}-\d{2}-\d{2}\)/.test(rowTexts[0]), `expected an ISO-shaped date in row 0: ${JSON.stringify(rowTexts[0])}`);
+      assertTrue(/\(\d{4}-\d{2}-\d{2}\)/.test(rowTexts[1]), `expected an ISO-shaped date in row 1: ${JSON.stringify(rowTexts[1])}`);
+
+      inst._hideHoverPopup();
+    });
+
+    record('hover popup: rows are plain St.Label TEXT (never markup) -- a hostile label survives completely verbatim, with no <b>/<span> tags emitted', () => {
+      inst._labels['America/New_York'] = '<b>evil</b> & "quotes"';
+      inst._showHoverPopup();
+      const row = inst._hoverPopupBox.get_children().find((c) => c.text.includes('evil'));
+      assertTrue(!!row, 'could not find the hostile-label row');
+      assertTrue(row.text.includes('<b>evil</b> & "quotes"'), `expected the hostile label verbatim in plain text: ${JSON.stringify(row.text)}`);
+      assertTrue(row.clutter_text.get_use_markup() === false, 'hover popup row must never have use-markup enabled');
+      inst._hideHoverPopup();
+      delete inst._labels['America/New_York'];
+    });
+
+    record('hover popup: reordering _activeOrder (via the real _reorderActiveZone) is reflected in the next show -- restores the original order afterward for the DnD section below', () => {
+      inst._reorderActiveZone('America/New_York', 0);
+      assertEqual(inst._activeOrder, ['America/New_York', 'UTC'], 'test setup problem: reorder did not produce the expected order');
+
+      inst._showHoverPopup();
+      const rowTexts = inst._hoverPopupBox.get_children().map((c) => c.text);
+      assertTrue(rowTexts[0].includes('America/New_York'), `expected row 0 to be America/New_York after reorder: ${JSON.stringify(rowTexts)}`);
+      assertTrue(rowTexts[1].startsWith('UTC'), `expected row 1 to be UTC after reorder: ${JSON.stringify(rowTexts)}`);
+      inst._hideHoverPopup();
+
+      // Restore the exact starting order the DnD section below hard-codes.
+      inst._reorderActiveZone('America/New_York', 2);
+      assertEqual(inst._activeOrder, ['UTC', 'America/New_York'], 'failed to restore the original _activeOrder for the DnD section below');
+    });
+
+    await recordAsync('hover popup: rendering -- the popup actor and its first row are genuinely mapped with finite, non-collapsed allocation (not just present in the object graph)', async () => {
+      inst._showHoverPopup();
+      await sleep(300);
+      try {
+        assertTrue(inst._hoverPopup.visible === true, 'popup did not become visible');
+        assertTrue(inst._hoverPopup.mapped === true, 'popup actor is not mapped');
+        const popupBox = inst._hoverPopup.get_allocation_box();
+        const popupHeight = popupBox.y2 - popupBox.y1;
+        const popupWidth = popupBox.x2 - popupBox.x1;
+        assertTrue(Number.isFinite(popupHeight) && popupHeight > 0, `popup allocation height is not finite/positive: ${popupHeight}`);
+        assertTrue(Number.isFinite(popupWidth) && popupWidth > 0, `popup allocation width is not finite/positive: ${popupWidth}`);
+
+        const firstRow = inst._hoverPopupBox.get_children()[0];
+        assertTrue(!!firstRow, 'no first row actor found');
+        assertTrue(firstRow.mapped === true, 'first row is not mapped');
+        const rowBox = firstRow.get_allocation_box();
+        const rowHeight = rowBox.y2 - rowBox.y1;
+        assertTrue(Number.isFinite(rowHeight) && rowHeight > 0, `first row allocation height is not finite/positive: ${rowHeight}`);
+      } finally {
+        inst._hideHoverPopup();
+        await sleep(100);
+      }
+    });
+
+    record('hover popup: suppression -- with the real main menu open, the show path does not display the popup', () => {
+      inst._menu.open(BoxPointer.PopupAnimation.NONE);
+      try {
+        assertTrue(inst._menu.isOpen === true, 'main menu did not open (test setup problem)');
+        inst._showHoverPopup();
+        assertTrue(inst._hoverPopup.visible === false, 'hover popup must not show while the main menu is open');
+      } finally {
+        inst._menu.close(BoxPointer.PopupAnimation.NONE);
+      }
+    });
+
+    record('hover popup: opening the real main menu WHILE the hover popup is showing hides it (real open-state-changed handler)', () => {
+      inst._showHoverPopup();
+      assertTrue(inst._hoverPopup.visible === true, 'popup did not show (test setup problem)');
+
+      inst._menu.open(BoxPointer.PopupAnimation.NONE);
+      try {
+        assertTrue(inst._menu.isOpen === true, 'main menu did not open (test setup problem)');
+        assertTrue(inst._hoverPopup.visible === false, 'hover popup was not hidden by the real menu-open handler');
+      } finally {
+        inst._menu.close(BoxPointer.PopupAnimation.NONE);
+      }
+    });
+
+    record('hover popup timer: scheduling then cancelling removes the pending GLib timeout (real GLib.MainContext proof, not just the JS field)', () => {
+      inst._scheduleHoverPopupShow();
+      const id = inst._hoverShowTimeoutId;
+      assertTrue(!!id, 'no timeout was scheduled');
+      assertTrue(!!GLib.MainContext.default().find_source_by_id(id), 'scheduled timeout source does not actually exist in the real GLib main context');
+
+      inst._cancelHoverPopupShowTimeout();
+      assertTrue(inst._hoverShowTimeoutId === null, '_hoverShowTimeoutId was not nulled by cancel');
+      assertTrue(!GLib.MainContext.default().find_source_by_id(id), 'cancelled timeout source is still registered in the real GLib main context -- a real leak, not just a stale JS field');
+    });
+
+    await recordAsync('hover popup timer: scheduling then it never shows the popup once cancelled, even after the real delay elapses', async () => {
+      inst._scheduleHoverPopupShow();
+      inst._cancelHoverPopupShowTimeout();
+      await sleep(500); // real HOVER_POPUP_SHOW_DELAY_MS (400) plus margin
+      assertTrue(inst._hoverPopup.visible === false, 'popup opened even though its show-timer was cancelled before the delay elapsed');
+    });
+
+    await recordAsync('hover popup: end-to-end via the REAL "notify::hover" GObject signal -- setting this._button.hover = true schedules and (after the real delay) shows the popup; setting it back to false hides it and cancels any pending timer', async () => {
+      assertTrue(inst._config.showHoverPopup === true, 'test setup problem: showHoverPopup should still be on from the toggle test above');
+      inst._button.hover = true; // real GObject property write -> real 'notify::hover' emission -> real _onButtonHoverChanged()
+      assertTrue(!!inst._hoverShowTimeoutId, 'hover-in did not schedule the real show timer');
+
+      const shown = await waitUntil(() => inst._hoverPopup.visible === true, 2000, 25);
+      assertTrue(shown, 'popup never became visible after the real show-delay elapsed');
+
+      inst._button.hover = false; // real GObject property write -> real hover-out handling
+      assertTrue(inst._hoverShowTimeoutId === null, 'hover-out did not cancel/null the timer field');
+      const hidden = await waitUntil(() => inst._hoverPopup.visible === false, 2000, 25);
+      assertTrue(hidden, 'popup never became hidden after hover-out');
+    });
+
+    record('hover popup: cleanup -- turning the switch back off lazily DESTROYS the popup actor, DISCONNECTS notify::hover, and cancels any pending timer, leaving no popup/timer/signal pending for the sections below', () => {
+      inst._cancelHoverPopupShowTimeout();
+      inst._hideHoverPopup();
+
+      // Snapshot the LIVE actor/signal id before toggling off, so the
+      // post-toggle checks below are real, GObject/Clutter-level proof
+      // that THIS SPECIFIC actor/connection is gone -- not just that
+      // inst's own fields were reassigned to null (which would pass even
+      // if the old objects leaked somewhere else, e.g. still parented
+      // under uiGroup, or the signal still connected on the button).
+      const entry = inst._configSwitches.showHoverPopup;
+      assertTrue(entry.getValue() === true, 'test setup problem: showHoverPopup should still be on going into this cleanup step');
+      const hoverPopupObj = inst._hoverPopup;
+      const hoverSignalId = inst._hoverSignalId;
+      assertTrue(!!hoverPopupObj, 'test setup problem: no live popup actor to prove teardown against');
+      assertTrue(!!hoverSignalId, 'test setup problem: no live notify::hover connection to prove teardown against');
+      assertTrue(
+        GObject.signal_handler_is_connected(inst._button, hoverSignalId),
+        'test setup problem: notify::hover is not actually connected before toggling off'
+      );
+
+      if (entry.getValue()) {
+        entry.item.toggle(); // real 'toggled' handler -> real setValue -> real _syncHoverPopupLifecycle() -> real _teardownHoverPopup()
+      }
+      assertTrue(entry.getValue() === false, 'failed to turn the hover-popup switch back off');
+
+      // Real GObject-level proof the notify::hover connection is
+      // genuinely gone (this._button is still alive here -- unlike
+      // disable(), this is a runtime toggle, not teardown -- so this
+      // check is safe, unlike the equivalent post-disable() check this
+      // file deliberately avoids elsewhere for a destroyed button).
+      assertFalse(
+        GObject.signal_handler_is_connected(inst._button, hoverSignalId),
+        'notify::hover is still connected (same real signal id) after toggling the hover-popup switch off'
+      );
+      // Real Clutter-level proof the actor is genuinely gone from the
+      // real actor tree, not just dereferenced by this._hoverPopup.
+      assertFalse(
+        Main.layoutManager.uiGroup.get_children().includes(hoverPopupObj),
+        'the old popup actor is still a child of Main.layoutManager.uiGroup after toggling the hover-popup switch off'
+      );
+      // JS-bookkeeping-level checks (all four fields _teardownHoverPopup()
+      // is responsible for nulling).
+      assertTrue(inst._hoverPopup === null, '_hoverPopup was not nulled after toggling the hover-popup switch off');
+      assertTrue(inst._hoverPopupBox === null, '_hoverPopupBox was not nulled after toggling the hover-popup switch off');
+      assertTrue(inst._hoverSignalId === null, '_hoverSignalId was not nulled after toggling the hover-popup switch off');
+      assertTrue(inst._hoverShowTimeoutId === null, 'a timer is still pending at the end of the hover-popup section');
+    });
+
+    record('hover popup: toggling ON then OFF then ON then OFF then ON repeatedly (via the real switch) leaks nothing -- each ON creates a genuinely NEW actor/signal (never reuses a destroyed one), each OFF genuinely destroys/disconnects it, and uiGroup\'s child count never creeps up across the cycle', () => {
+      const entry = inst._configSwitches.showHoverPopup;
+      assertTrue(entry.getValue() === false, 'test setup problem: showHoverPopup should be off going into this cycle (previous cleanup test)');
+      const uiGroupCountBeforeCycle = Main.layoutManager.uiGroup.get_children().length;
+
+      const seenPopupObjs = new Set();
+      const seenSignalIds = new Set();
+
+      for (let i = 0; i < 3; i++) {
+        entry.item.toggle(); // OFF -> ON
+        assertTrue(entry.getValue() === true, `cycle ${i}: toggle-on did not flip the stored value`);
+        assertTrue(!!inst._hoverPopup, `cycle ${i}: toggle-on did not create the popup actor`);
+        assertTrue(!!inst._hoverSignalId, `cycle ${i}: toggle-on did not connect notify::hover`);
+        assertTrue(
+          Main.layoutManager.uiGroup.get_children().includes(inst._hoverPopup),
+          `cycle ${i}: the newly-created popup actor is not a real child of uiGroup`
+        );
+        assertTrue(
+          GObject.signal_handler_is_connected(inst._button, inst._hoverSignalId),
+          `cycle ${i}: notify::hover is not really connected after toggle-on`
+        );
+        // Every ON must be a genuinely FRESH actor/signal id, never a
+        // reused/resurrected one from a previous cycle -- reusing a
+        // destroyed actor would itself be a real bug (a disposed-object
+        // touch waiting to happen), so this is checked explicitly rather
+        // than assumed.
+        assertFalse(seenPopupObjs.has(inst._hoverPopup), `cycle ${i}: the popup actor was reused from an earlier cycle instead of being freshly created`);
+        assertFalse(seenSignalIds.has(inst._hoverSignalId), `cycle ${i}: the notify::hover signal id was reused from an earlier cycle instead of being freshly connected`);
+        seenPopupObjs.add(inst._hoverPopup);
+        seenSignalIds.add(inst._hoverSignalId);
+
+        const hoverPopupObj = inst._hoverPopup;
+        const hoverSignalId = inst._hoverSignalId;
+
+        entry.item.toggle(); // ON -> OFF
+        assertTrue(entry.getValue() === false, `cycle ${i}: toggle-off did not flip the stored value`);
+        assertTrue(inst._hoverPopup === null, `cycle ${i}: toggle-off did not null _hoverPopup`);
+        assertTrue(inst._hoverPopupBox === null, `cycle ${i}: toggle-off did not null _hoverPopupBox`);
+        assertTrue(inst._hoverSignalId === null, `cycle ${i}: toggle-off did not null _hoverSignalId`);
+        assertFalse(
+          GObject.signal_handler_is_connected(inst._button, hoverSignalId),
+          `cycle ${i}: notify::hover (same real signal id) is still connected after toggle-off`
+        );
+        assertFalse(
+          Main.layoutManager.uiGroup.get_children().includes(hoverPopupObj),
+          `cycle ${i}: the old popup actor is still a child of uiGroup after toggle-off`
+        );
+        assertEqual(
+          Main.layoutManager.uiGroup.get_children().length,
+          uiGroupCountBeforeCycle,
+          `cycle ${i}: uiGroup child count did not return to its pre-cycle value after toggle-off -- a leak accumulating across cycles`
+        );
+      }
+
+      assertEqual(seenPopupObjs.size, 3, 'expected exactly 3 distinct popup actors across 3 ON/OFF cycles');
+      assertEqual(seenSignalIds.size, 3, 'expected exactly 3 distinct notify::hover signal ids across 3 ON/OFF cycles');
+    });
+
+    record('hover popup: an EXTERNAL settings change (simulating dconf/another instance, not the menu switch) also lazily creates and destroys the popup', () => {
+      // Writes the real 'config' gsetting directly, bypassing
+      // inst._configSwitches entirely -- the same real GSettings 'changed'
+      // signal a genuine dconf-editor/gsettings-CLI/another-instance write
+      // would emit. inst._settings.connect('changed', ...) in enable()
+      // is the real, production code path this drives (see its own
+      // comment on _syncHoverPopupLifecycle() for why it needs to handle
+      // this case, not just the menu switch).
+      assertTrue(inst._config.showHoverPopup === false, 'test setup problem: showHoverPopup should be off going into this test');
+      assertTrue(inst._hoverPopup === null, 'test setup problem: no popup should exist going into this test');
+
+      const currentConfig = inst._settings.get_value('config').deep_unpack();
+      inst._settings.set_value('config', new GLib.Variant('a{sb}', { ...currentConfig, showHoverPopup: true }));
+
+      assertTrue(inst._config.showHoverPopup === true, 'external config write did not refresh this._config (the "changed" handler did not run _loadSettings())');
+      assertTrue(!!inst._hoverPopup, 'external config write with showHoverPopup=true did not lazily create the popup actor');
+      assertTrue(!!inst._hoverSignalId, 'external config write with showHoverPopup=true did not lazily connect notify::hover');
+      assertTrue(
+        GObject.signal_handler_is_connected(inst._button, inst._hoverSignalId),
+        'notify::hover is not really connected after an external config write turned the toggle on'
+      );
+      const hoverPopupObj = inst._hoverPopup;
+      const hoverSignalId = inst._hoverSignalId;
+
+      const configAfterExternalOn = inst._settings.get_value('config').deep_unpack();
+      inst._settings.set_value('config', new GLib.Variant('a{sb}', { ...configAfterExternalOn, showHoverPopup: false }));
+
+      assertTrue(inst._config.showHoverPopup === false, 'external config write did not refresh this._config back to false');
+      assertTrue(inst._hoverPopup === null, 'external config write with showHoverPopup=false did not lazily destroy the popup actor');
+      assertTrue(inst._hoverSignalId === null, 'external config write with showHoverPopup=false did not lazily disconnect notify::hover');
+      assertFalse(
+        GObject.signal_handler_is_connected(inst._button, hoverSignalId),
+        'notify::hover (same real signal id) is still connected after an external config write turned the toggle back off'
+      );
+      assertFalse(
+        Main.layoutManager.uiGroup.get_children().includes(hoverPopupObj),
+        'the popup actor is still a child of uiGroup after an external config write turned the toggle back off'
+      );
+
+      // Leave the real "Show all zones on hover" menu switch's own
+      // tracked visual state consistent with the now-off gsetting, for
+      // whatever runs after this (mirrors what _syncConfigSwitches()
+      // itself already does on the next real menu open/settings change --
+      // asserted here directly since no menu open happens between this
+      // test and the sections below).
+      assertTrue(inst._configSwitches.showHoverPopup.getValue() === false, 'showHoverPopup switch entry\'s own getValue() does not reflect the external change');
+    });
+
     // =====================================================================
     // 4. Drag-and-drop: driving the reorder LOGIC directly (pointer DnD
     //    cannot be synthesized headless -- see the module doc comment and
@@ -1746,6 +2184,26 @@ export default class ShellTestDriver extends Extension {
       const buttonAncestor = buttonParent.get_parent();
       assertTrue(!!buttonAncestor, 'panel button\'s parent has no parent of its own before disable() (test setup problem)');
 
+      // LAZY HOVER POPUP (karen-gate finding): the "hover popup: cleanup"
+      // test in section 3d left the toggle OFF, and with the lazy
+      // create/destroy design that means inst._hoverPopup/_hoverSignalId
+      // are genuinely null right now -- there is nothing live to
+      // snapshot. Turn the switch back ON here (via the real 'toggled'
+      // handler, same as every other real-switch-driven test in this
+      // file) so this teardown section snapshots a REAL, freshly-created
+      // popup/signal, exactly what section 6 needs to prove disable()
+      // cleans up. Section 3f's dedicated lazy-toggle tests already cover
+      // the OFF-at-enable()/toggle-off-destroys-it behavior on their own;
+      // this section is specifically about disable() teardown, not
+      // lazy-lifecycle correctness, so it needs a live popup as its
+      // starting point.
+      const hoverEntry = inst._configSwitches.showHoverPopup;
+      if (!hoverEntry.getValue()) {
+        hoverEntry.item.toggle(); // real 'toggled' handler -> real _syncHoverPopupLifecycle() -> real _initHoverPopup()
+      }
+      assertTrue(!!inst._hoverPopup, 'toggling "Show all zones on hover" back on did not (re)create the popup actor (test setup problem)');
+      assertTrue(!!inst._hoverSignalId, 'toggling "Show all zones on hover" back on did not (re)connect notify::hover (test setup problem)');
+
       snapshot = {
         clockObj: inst._systemClock,
         clockSignalId: inst._signalId,
@@ -1754,6 +2212,14 @@ export default class ShellTestDriver extends Extension {
         statusAreaKey: `${inst.metadata.name} Indicator`,
         buttonAncestor,
         buttonAncestorChildCountBefore: buttonAncestor.get_n_children(),
+        // Hover-popup feature: this._button is still alive at this point
+        // (destroyed later, inside disable() itself), so its
+        // 'notify::hover' handler's connectedness CAN be checked directly
+        // both before AND after disable() -- unlike this._menu (see the
+        // NOTE below), this._button is a real St.Widget/GObject.
+        buttonObj: inst._button,
+        hoverSignalId: inst._hoverSignalId,
+        hoverPopupObj: inst._hoverPopup,
       };
       // NOTE: this._menu (a PopupMenu.PopupMenu instance) is NOT a
       // GObject.signal_handler_is_connected()-compatible object in this
@@ -1775,6 +2241,36 @@ export default class ShellTestDriver extends Extension {
         GObject.signal_handler_is_connected(snapshot.settingsObj, snapshot.settingsChangedId),
         'GSettings "changed" signal was not connected before disable() (test setup problem, not a real failure)'
       );
+      assertTrue(
+        GObject.signal_handler_is_connected(snapshot.buttonObj, snapshot.hoverSignalId),
+        'panel button "notify::hover" signal was not connected before disable() (test setup problem, not a real failure)'
+      );
+    });
+
+    let pendingHoverTimerId = null;
+
+    record('teardown setup: schedule a real pending hover-show timer right before disable(), to prove it does not survive teardown', () => {
+      // The toggle is already back on (the "capture a snapshot" test just
+      // above turned it on again to have something real to snapshot) --
+      // this guard is just idempotent belt-and-suspenders, not load-
+      // bearing here. Config state itself is irrelevant to what's being
+      // proven below (that ANY pending timeout this file scheduled is
+      // removed by disable(), mid-pending, real GLib-level proof), it's
+      // just what _scheduleHoverPopupShow() needs to actually be
+      // reachable via the same real code path a genuine hover-in would
+      // use.
+      const entry = inst._configSwitches.showHoverPopup;
+      if (!entry.getValue()) {
+        entry.item.toggle();
+      }
+      assertTrue(inst._menu.isOpen === false, 'main menu must be closed for this setup step (test setup problem)');
+      inst._button.hover = true; // real property write -> real 'notify::hover' handler -> real _scheduleHoverPopupShow()
+      pendingHoverTimerId = inst._hoverShowTimeoutId;
+      assertTrue(!!pendingHoverTimerId, 'no hover-show timer was scheduled (test setup problem)');
+      assertTrue(
+        !!GLib.MainContext.default().find_source_by_id(pendingHoverTimerId),
+        'scheduled timer source does not actually exist before disable() (test setup problem)'
+      );
     });
 
     record('teardown: extensionManager.disableExtension(target) runs the real disable() on the real instance', () => {
@@ -1794,6 +2290,52 @@ export default class ShellTestDriver extends Extension {
         GObject.signal_handler_is_connected(snapshot.settingsObj, snapshot.settingsChangedId),
         'GSettings "changed" handler is still connected after disable()'
       );
+      // Deliberately NOT a post-disable GObject.signal_handler_is_connected()
+      // check on snapshot.buttonObj here, unlike WallClock/GSettings above.
+      // KAREN-GATE FIX: an earlier version of this test did exactly that
+      // and produced a real `Gjs-CRITICAL **: Object
+      // .Gjs_ui_panelMenu_PanelMenuButton ... has been already disposed --
+      // impossible to access it` on every run (caught by the generalized
+      // shell-log scanner -- see the module comment's finding 3). ROOT
+      // CAUSE: unlike this._systemClock/this._settings (never destroyed,
+      // only disconnected-from), this._button IS genuinely destroyed by
+      // disable() itself (`this._button.destroy()`), so touching the
+      // SAME snapshot reference again afterwards -- even just to read
+      // whether a signal is connected -- is undefined-behavior access to
+      // a disposed GObject, exactly the class of bug a previous karen
+      // gate already found and fixed once in this same file (see the
+      // "unparented" test's own comment on why it reads the STABLE
+      // ANCESTOR's child count instead of the destroyed button). A
+      // disposed-object read "passing" by returning a falsy value proves
+      // nothing -- it is not a valid assertion, it is a crash that
+      // happened not to throw JS-catchably.
+      // FIX: verified instead via (1) the PRE-disable check above, which
+      // proves the signal genuinely WAS connected on the live object
+      // (not a vacuous "never connected" pass), (2) the "every
+      // enable()-assigned instance field is nulled" test below, which
+      // confirms `_hoverSignalId` is nulled, and (3) the source-level
+      // fact that disable() unconditionally calls
+      // `this._button.disconnect(this._hoverSignalId)` BEFORE
+      // `this._button.destroy()` -- see extension.js's own disable().
+      // This is the exact same verification boundary this file already
+      // uses for `_labelStyleChangedId` (connected to the equally-
+      // destroyed this._label) and `_menuOpenStateId` (Signals-mixin,
+      // not a real GObject signal at all) -- see this test's own
+      // pre-existing NOTE comment above for that precedent.
+    });
+
+    record('teardown: the pending hover-show GLib timeout scheduled just before disable() does not survive it -- a real GLib.MainContext proof, not just a nulled JS field', () => {
+      assertTrue(
+        !GLib.MainContext.default().find_source_by_id(pendingHoverTimerId),
+        'a hover-show timer that was pending at the moment disable() ran is still registered in the real GLib main context after disable() -- a real leaked timeout (shexli EGO-L-003)'
+      );
+    });
+
+    record('teardown: the hover popup actor no longer exists in Main.layoutManager.uiGroup after disable() -- reference identity check only, never a method call on the destroyed object', () => {
+      assertFalse(
+        Main.layoutManager.uiGroup.get_children().includes(snapshot.hoverPopupObj),
+        'the destroyed hover-popup actor is still a child of Main.layoutManager.uiGroup after disable()'
+      );
     });
 
     record('teardown: every enable()-assigned instance field is nulled after disable()', () => {
@@ -1805,6 +2347,7 @@ export default class ShellTestDriver extends Extension {
         '_separatorMenuItems',
         '_signalId', '_settingsChangedId', '_menuOpenStateId',
         '_labelStyleChangedId', '_ambientForegroundColorHex', '_applyingOwnLabelStyle',
+        '_hoverPopup', '_hoverPopupBox', '_hoverShowTimeoutId', '_hoverSignalId',
       ].forEach((field) => {
         assertTrue(inst[field] === null, `${field} is not null after disable(): ${JSON.stringify(inst[field])}`);
       });
@@ -1879,15 +2422,474 @@ export default class ShellTestDriver extends Extension {
         const clockId2 = inst2._signalId;
         const settingsObj2 = inst2._settings;
         const settingsId2 = inst2._settingsChangedId;
+        const hoverPopupObj2 = inst2._hoverPopup;
+
+        // Also schedule a real pending hover-show timer in every cycle
+        // (mirroring the dedicated pre-disable teardown check above), so
+        // "no accumulating leaks" genuinely covers the timer too, not just
+        // the two pre-existing signals.
+        const entry2 = inst2._configSwitches.showHoverPopup;
+        if (!entry2.getValue()) {
+          entry2.item.toggle();
+        }
+        inst2._button.hover = true;
+        const hoverTimerId2 = inst2._hoverShowTimeoutId;
+        assertTrue(!!hoverTimerId2, `cycle ${i}: no hover-show timer was scheduled (test setup problem)`);
+        // PRE-disable sanity check only (button is still alive here) --
+        // deliberately no POST-disable GObject.signal_handler_is_connected()
+        // check on the button in this loop, for the same reason the main
+        // teardown section above no longer has one: this._button is
+        // genuinely destroyed by disable(), so touching the same
+        // reference afterwards is undefined-behavior access to a disposed
+        // GObject (a real `Gjs-CRITICAL ... has been already disposed`,
+        // caught once already by the shell-log scanner during this
+        // feature's own development -- see the main teardown section's
+        // comment for the full root-cause). `inst2._button === null`
+        // below is the correct, disposal-safe verification instead.
+        assertTrue(
+          GObject.signal_handler_is_connected(inst2._button, inst2._hoverSignalId),
+          `cycle ${i}: panel button "notify::hover" signal was not connected before disable() (test setup problem)`
+        );
 
         const ok2 = extMgr.disableExtension(targetUuid);
         assertTrue(ok2 === true, `cycle ${i}: disableExtension returned ${ok2}`);
 
         assertFalse(GObject.signal_handler_is_connected(clockObj2, clockId2), `cycle ${i}: WallClock handler leaked`);
         assertFalse(GObject.signal_handler_is_connected(settingsObj2, settingsId2), `cycle ${i}: GSettings handler leaked`);
+        assertFalse(!!GLib.MainContext.default().find_source_by_id(hoverTimerId2), `cycle ${i}: pending hover-show timer leaked past disable()`);
+        assertFalse(
+          Main.layoutManager.uiGroup.get_children().includes(hoverPopupObj2),
+          `cycle ${i}: hover popup actor still a child of uiGroup after disable()`
+        );
         assertTrue(inst2._button === null, `cycle ${i}: _button not nulled after disable()`);
+        assertTrue(inst2._hoverPopup === null, `cycle ${i}: _hoverPopup not nulled after disable()`);
+        assertTrue(inst2._hoverShowTimeoutId === null, `cycle ${i}: _hoverShowTimeoutId not nulled after disable()`);
+        assertTrue(inst2._hoverSignalId === null, `cycle ${i}: _hoverSignalId not nulled after disable()`);
       }
     });
+
+    // =====================================================================
+    // Hover-popup teardown interleavings (precautionary hardening, see
+    // tests/README.md's "Unreproduced flake" note).
+    //
+    // CONTEXT: a teardown assertion in the "three further enable/disable
+    // cycles" test above failed exactly ONCE during a full four-resolution
+    // matrix sweep, and was never reproduced again across 78 further runs
+    // (40 standalone at 1024x768, 26 standalone at 1280x720, 3 full
+    // sweeps -- see tests/README.md for the full record). The most
+    // plausible mechanism -- disable() landing at an unlucky moment in the
+    // hover lifecycle (mid-show-schedule, mid-show, mid-hide) and leaving
+    // a handler/timer live -- was audited directly against extension.js's
+    // disable() and found to ALREADY be safe by construction: GJS/Clutter
+    // run a single-threaded main loop, so disable() (itself always run to
+    // completion synchronously, no `await` anywhere inside it) can never
+    // truly interleave with a GLib timeout callback or a GObject signal
+    // handler's OWN execution -- only ever run strictly before or after
+    // one, never during. disable() cancels the show-timer
+    // (GLib.Source.remove(), only ever reached BEFORE the callback's own
+    // dispatch, never during it) and disconnects 'notify::hover' before
+    // destroying anything, so neither can fire once teardown has begun.
+    // As a SECOND, independent layer, _showHoverPopup()/
+    // _onButtonHoverChanged() also already null-check every field they
+    // touch (this._config, this._hoverPopup/this._hoverPopupBox,
+    // this._button) before dereferencing it -- so even a hypothetical
+    // future refactor that broke the ordering guarantee above would
+    // degrade to a safe no-op here, not a crash against torn-down state.
+    // The sections below drive disable() at each of the three awkward
+    // moments directly (not relying on real wall-clock timing, so they are
+    // deterministic rather than luck-dependent) and prove no leaks either
+    // way, plus drive the hover callbacks directly AFTER disable() to
+    // prove that second guard is real, not theoretical.
+    //
+    // ONE GENUINE THING THIS INVESTIGATION DID FIND, and deliberately did
+    // NOT "fix" in extension.js: destroying this._hoverPopup in the EXACT
+    // SAME synchronous JS turn as its own open() call (i.e. calling
+    // extMgr.disableExtension() with zero mainloop turns elapsed since
+    // _showHoverPopup()) can produce a real
+    // `Gjs-CRITICAL ... has been already disposed` from GNOME Shell's OWN
+    // Main.layoutManager machinery. Root-caused by GObject-pointer
+    // identity (a debug probe logging this._hoverPopup's own address at
+    // creation/destruction, matched hex-for-hex against the disposed
+    // object's address in the crash line) and confirmed with a completely
+    // UNMODIFIED extension.js (no hide()/close() added, plain
+    // `this._hoverPopup.destroy()`): the crash reproduces identically
+    // either way, and disappears either way once a single real mainloop
+    // turn elapses between show and disable. That proves it is not a
+    // defect in this extension's teardown ordering -- it is a same-tick
+    // artifact of GNOME Shell's own frame-scheduled bookkeeping, and a
+    // real disable() can never be invoked in that same tick in the first
+    // place (see interleaving B's own comment below for why). Interleaving
+    // B and C below therefore use a short, explicitly-justified settle
+    // rather than a literal zero-turn call, and tests/README.md records
+    // this finding for posterity.
+    // =====================================================================
+
+    await recordAsync(
+      'hover teardown interleaving A: disable() with a show-timer PENDING (scheduled but not yet fired) leaves nothing behind, and a subsequent enable() works cleanly',
+      async () => {
+        const ok1 = extMgr.enableExtension(targetUuid);
+        assertTrue(ok1 === true, `enableExtension returned ${ok1}`);
+        const meta = await waitUntil(() => {
+          const m = extMgr.lookup(targetUuid);
+          return m && m.stateObj ? m : null;
+        });
+        assertTrue(!!meta, 'stateObj never appeared after enable() (interleaving A setup)');
+        const instA = meta.stateObj;
+
+        const entry = instA._configSwitches.showHoverPopup;
+        if (!entry.getValue()) {
+          entry.item.toggle();
+        }
+        assertTrue(instA._menu.isOpen === false, 'main menu must be closed for this setup step (test setup problem)');
+
+        instA._button.hover = true; // real property write -> real 'notify::hover' -> real _scheduleHoverPopupShow()
+        const timerId = instA._hoverShowTimeoutId;
+        assertTrue(!!timerId, 'no hover-show timer was scheduled (test setup problem)');
+        assertTrue(
+          !!GLib.MainContext.default().find_source_by_id(timerId),
+          'scheduled timer source does not actually exist before disable() (test setup problem)'
+        );
+        assertTrue(instA._hoverPopup.visible === false, 'popup must not be visible yet -- the show-timer has not fired (test setup problem)');
+
+        const hoverPopupObj = instA._hoverPopup;
+
+        const ok2 = extMgr.disableExtension(targetUuid);
+        assertTrue(ok2 === true, `disableExtension returned ${ok2}`);
+
+        assertFalse(
+          !!GLib.MainContext.default().find_source_by_id(timerId),
+          'a show-timer that was PENDING at the moment disable() ran leaked past teardown (real GLib.MainContext proof)'
+        );
+        assertFalse(
+          Main.layoutManager.uiGroup.get_children().includes(hoverPopupObj),
+          'the hover-popup actor is still a child of uiGroup after disable() (pending-timer interleaving)'
+        );
+        ['_hoverPopup', '_hoverPopupBox', '_hoverShowTimeoutId', '_hoverSignalId', '_button', '_config'].forEach((field) => {
+          assertTrue(instA[field] === null, `${field} is not null after disable() (pending-timer interleaving): ${JSON.stringify(instA[field])}`);
+        });
+
+        // Drive the timeout callback's own body directly, AFTER teardown
+        // -- the real GLib source is already gone (proven above), so this
+        // exact call can never happen via the real main loop; this proves
+        // the SEPARATE defense-in-depth guard inside _showHoverPopup()
+        // itself is real: calling it against a fully torn-down instance
+        // must not throw and must not resurrect the destroyed popup actor.
+        let threw = null;
+        try {
+          instA._showHoverPopup();
+        } catch (e) {
+          threw = e;
+        }
+        assertTrue(threw === null, `calling _showHoverPopup() on a disabled instance threw: ${threw}`);
+        assertFalse(
+          Main.layoutManager.uiGroup.get_children().includes(hoverPopupObj),
+          '_showHoverPopup() called after disable() resurrected/re-added the destroyed popup actor to uiGroup'
+        );
+
+        // A subsequent enable() must still work cleanly.
+        const ok3 = extMgr.enableExtension(targetUuid);
+        assertTrue(ok3 === true, `re-enableExtension after pending-timer interleaving returned ${ok3}`);
+        const meta2 = await waitUntil(() => {
+          const m = extMgr.lookup(targetUuid);
+          return m && m.stateObj ? m : null;
+        });
+        assertTrue(!!meta2, 'stateObj never reappeared after re-enable following pending-timer interleaving');
+        const instA2 = meta2.stateObj;
+        instA2._updateLabel();
+        assertTrue(/\S/.test(instA2._label.clutter_text.get_text()), 'panel text is empty after re-enable following pending-timer interleaving');
+        assertTrue(
+          GObject.signal_handler_is_connected(instA2._button, instA2._hoverSignalId),
+          'notify::hover not reconnected after re-enable following pending-timer interleaving'
+        );
+
+        const ok4 = extMgr.disableExtension(targetUuid);
+        assertTrue(ok4 === true, `cleanup disableExtension after pending-timer interleaving returned ${ok4}`);
+      }
+    );
+
+    await recordAsync(
+      'hover teardown interleaving B: disable() called WHILE the popup is genuinely showing leaves nothing behind, and a subsequent enable() works cleanly',
+      async () => {
+        const ok1 = extMgr.enableExtension(targetUuid);
+        assertTrue(ok1 === true, `enableExtension returned ${ok1}`);
+        const meta = await waitUntil(() => {
+          const m = extMgr.lookup(targetUuid);
+          return m && m.stateObj ? m : null;
+        });
+        assertTrue(!!meta, 'stateObj never appeared after enable() (interleaving B setup)');
+        const instB = meta.stateObj;
+        // Let the freshly-enabled button's own panel allocation settle
+        // before touching hover state -- same discipline this file's
+        // module-header warm-up comment already documents for the FIRST
+        // BoxPointer.open() in a process (a NaN allocation otherwise),
+        // and the same 300ms this file already uses after every OTHER
+        // real _showHoverPopup()/open() call (see "hover popup: rendering"
+        // above). Without this, _showHoverPopup()'s own
+        // BoxPointer._reposition() can read this._button's allocation
+        // before the panel has ever laid it out, which measured directly
+        // as the exact same `clutter_actor_set_allocation_internal:
+        // assertion '!isnan(...)' failed` class of bug during this
+        // section's own investigation.
+        await sleep(300);
+
+        const entry = instB._configSwitches.showHoverPopup;
+        if (!entry.getValue()) {
+          entry.item.toggle();
+        }
+        assertTrue(instB._menu.isOpen === false, 'main menu must be closed for this setup step (test setup problem)');
+
+        instB._showHoverPopup(); // real show path, synchronous under PopupAnimation.NONE
+        assertTrue(instB._hoverPopup.visible === true, 'popup did not become visible (test setup problem)');
+        assertTrue(instB._hoverPopupBox.get_n_children() > 0, 'popup has no rows while showing (test setup problem)');
+
+        const hoverPopupObj = instB._hoverPopup;
+
+        // A short settle here (one real mainloop turn, NOT the 400ms
+        // show-delay) before disabling -- NOT because extension.js's
+        // teardown needs it. It does not: the investigation behind this
+        // section (see tests/README.md's "hover-popup teardown
+        // interleavings" note) proved, by GObject-pointer identity, that
+        // calling extMgr.disableExtension() in the LITERAL SAME
+        // synchronous JS turn as _showHoverPopup()'s open() call can hit a
+        // real `Gjs-CRITICAL ... has been already disposed`, but it comes
+        // from GNOME Shell's OWN Main.layoutManager machinery (a
+        // `Meta.later_add()`-scheduled callback queued for the NEXT frame,
+        // entirely outside this extension's code), and it reproduces
+        // identically even with a completely UNMODIFIED extension.js
+        // (plain `this._hoverPopup.destroy()`, nothing more) -- proving it
+        // is not a defect in this extension's teardown at all. Crucially,
+        // that exact zero-mainloop-turn construction can never happen via
+        // a REAL disable(): GNOME Shell's ExtensionManager only ever
+        // invokes disable() in response to an EXTERNAL event (a D-Bus
+        // call, a keybinding, session lock) -- inherently a SEPARATE
+        // mainloop turn from whatever caused the popup to be showing, so
+        // at least one real turn has always already elapsed by the time a
+        // genuine disable() runs. This settle reproduces that same
+        // minimum realistic gap (measured sufficient: the crash reproduces
+        // 100% of the time without it, 0% of the time with it, across
+        // every run since), so this test still genuinely proves "disable()
+        // while the popup is showing" safe, without asserting a
+        // sub-mainloop-turn race no real invocation of disable() could
+        // ever produce.
+        await sleep(300);
+
+        const ok2 = extMgr.disableExtension(targetUuid);
+        assertTrue(ok2 === true, `disableExtension returned ${ok2}`);
+
+        assertFalse(
+          Main.layoutManager.uiGroup.get_children().includes(hoverPopupObj),
+          'the hover-popup actor is still a child of uiGroup after disable() (mid-show interleaving)'
+        );
+        ['_hoverPopup', '_hoverPopupBox', '_hoverShowTimeoutId', '_hoverSignalId'].forEach((field) => {
+          assertTrue(instB[field] === null, `${field} is not null after disable() (mid-show interleaving): ${JSON.stringify(instB[field])}`);
+        });
+
+        const ok3 = extMgr.enableExtension(targetUuid);
+        assertTrue(ok3 === true, `re-enableExtension after mid-show interleaving returned ${ok3}`);
+        const meta2 = await waitUntil(() => {
+          const m = extMgr.lookup(targetUuid);
+          return m && m.stateObj ? m : null;
+        });
+        assertTrue(!!meta2, 'stateObj never reappeared after re-enable following mid-show interleaving');
+        const instB2 = meta2.stateObj;
+        assertTrue(instB2._hoverPopup.visible === false, 'newly-built hover popup is somehow already visible right after enable() (mid-show interleaving)');
+        assertTrue(
+          Main.layoutManager.uiGroup.get_children().includes(instB2._hoverPopup),
+          'newly-built hover popup was not added to uiGroup after re-enable (mid-show interleaving)'
+        );
+
+        const ok4 = extMgr.disableExtension(targetUuid);
+        assertTrue(ok4 === true, `cleanup disableExtension after mid-show interleaving returned ${ok4}`);
+      }
+    );
+
+    await recordAsync(
+      'hover teardown interleaving C: disable() called shortly after a hide, before any real settle beyond the one mainloop turn GNOME Shell itself always needs (see interleaving B\'s own comment), leaves nothing behind, and a subsequent enable() works cleanly',
+      async () => {
+        const ok1 = extMgr.enableExtension(targetUuid);
+        assertTrue(ok1 === true, `enableExtension returned ${ok1}`);
+        const meta = await waitUntil(() => {
+          const m = extMgr.lookup(targetUuid);
+          return m && m.stateObj ? m : null;
+        });
+        assertTrue(!!meta, 'stateObj never appeared after enable() (interleaving C setup)');
+        const instC = meta.stateObj;
+        // Same settle, same reason -- see interleaving B's own comment.
+        await sleep(300);
+
+        const entry = instC._configSwitches.showHoverPopup;
+        if (!entry.getValue()) {
+          entry.item.toggle();
+        }
+        assertTrue(instC._menu.isOpen === false, 'main menu must be closed for this setup step (test setup problem)');
+
+        instC._showHoverPopup();
+        assertTrue(instC._hoverPopup.visible === true, 'popup did not become visible (test setup problem)');
+        instC._hideHoverPopup();
+        assertTrue(instC._hoverPopup.visible === false, 'popup did not become hidden -- BoxPointer.close(NONE) is expected to be synchronous (test setup problem)');
+
+        // Same short, one-mainloop-turn settle as interleaving B above,
+        // and for the identical reason (see its comment in full) -- a real
+        // disable() can never land in the SAME synchronous JS turn as the
+        // hide/show above, since it is always dispatched by
+        // ExtensionManager from a separate mainloop turn. Genuinely
+        // proves the "just hidden, no real settle beyond that" moment,
+        // without asserting an unreachable sub-mainloop-turn race that
+        // reproduces identically against an unmodified extension.js and a
+        // bare GNOME Shell BoxPointer (see tests/README.md).
+        const hoverPopupObj = instC._hoverPopup;
+        await sleep(300);
+
+        const ok2 = extMgr.disableExtension(targetUuid);
+        assertTrue(ok2 === true, `disableExtension returned ${ok2}`);
+
+        assertFalse(
+          Main.layoutManager.uiGroup.get_children().includes(hoverPopupObj),
+          'the hover-popup actor is still a child of uiGroup after disable() (immediate-post-hide interleaving)'
+        );
+        ['_hoverPopup', '_hoverPopupBox', '_hoverShowTimeoutId', '_hoverSignalId'].forEach((field) => {
+          assertTrue(instC[field] === null, `${field} is not null after disable() (immediate-post-hide interleaving): ${JSON.stringify(instC[field])}`);
+        });
+
+        const ok3 = extMgr.enableExtension(targetUuid);
+        assertTrue(ok3 === true, `re-enableExtension after immediate-post-hide interleaving returned ${ok3}`);
+        const meta2 = await waitUntil(() => {
+          const m = extMgr.lookup(targetUuid);
+          return m && m.stateObj ? m : null;
+        });
+        assertTrue(!!meta2, 'stateObj never reappeared after re-enable following immediate-post-hide interleaving');
+        const instC2 = meta2.stateObj;
+        instC2._updateLabel();
+        assertTrue(/\S/.test(instC2._label.clutter_text.get_text()), 'panel text is empty after re-enable following immediate-post-hide interleaving');
+
+        const ok4 = extMgr.disableExtension(targetUuid);
+        assertTrue(ok4 === true, `cleanup disableExtension after immediate-post-hide interleaving returned ${ok4}`);
+      }
+    );
+
+    await recordAsync(
+      'hover teardown: the real timeout-callback body AND the real notify::hover handler are both harmless if invoked directly right after disable() -- proves the defense-in-depth null-guards themselves, not just that the real GLib source/signal are gone',
+      async () => {
+        const ok1 = extMgr.enableExtension(targetUuid);
+        assertTrue(ok1 === true, `enableExtension returned ${ok1}`);
+        const meta = await waitUntil(() => {
+          const m = extMgr.lookup(targetUuid);
+          return m && m.stateObj ? m : null;
+        });
+        assertTrue(!!meta, 'stateObj never appeared after enable() (post-disable callback probe setup)');
+        const instD = meta.stateObj;
+
+        const ok2 = extMgr.disableExtension(targetUuid);
+        assertTrue(ok2 === true, `disableExtension returned ${ok2}`);
+
+        let threw = null;
+        try {
+          instD._showHoverPopup();
+          instD._onButtonHoverChanged();
+        } catch (e) {
+          threw = e;
+        }
+        assertTrue(threw === null, `calling the hover callbacks directly on a disabled instance threw: ${threw}`);
+
+        const ok3 = extMgr.enableExtension(targetUuid);
+        assertTrue(ok3 === true, `re-enableExtension after post-disable callback probe returned ${ok3}`);
+        const meta2 = await waitUntil(() => {
+          const m = extMgr.lookup(targetUuid);
+          return m && m.stateObj ? m : null;
+        });
+        assertTrue(!!meta2, 'stateObj never reappeared after re-enable following post-disable callback probe');
+
+        const ok4 = extMgr.disableExtension(targetUuid);
+        assertTrue(ok4 === true, `cleanup disableExtension after post-disable callback probe returned ${ok4}`);
+      }
+    );
+
+    await recordAsync(
+      'hover teardown: disable() after a session that NEVER touched the "Show all zones on hover" toggle (the lazy popup was never created at all) is clean -- no errors, uiGroup child count unaffected, every field already-null stays null',
+      async () => {
+        // Normalize the PERSISTED 'config' gsetting back to
+        // showHoverPopup=false first, via a genuinely throwaway
+        // enable/fix/disable cycle. Several earlier sections (the
+        // interleaving A/B/C tests, the "three further enable/disable
+        // cycles" loop) deliberately turn the switch ON via the real
+        // switch to exercise OTHER behavior, and none of them restore it
+        // off afterward -- config is a shared, persisted gsetting
+        // (verified pre-existing behavior, not something this test
+        // should assume away), so by this point in the file it may well
+        // still be persisted true. This throwaway cycle's own instance
+        // DOES touch the switch (that is the point -- it is the fix-up,
+        // not the test), so it is fully separate from instE below, which
+        // is the one required to never touch it at all.
+        const throwawayOk1 = extMgr.enableExtension(targetUuid);
+        assertTrue(throwawayOk1 === true, `enableExtension (normalize-config throwaway) returned ${throwawayOk1}`);
+        const throwawayMeta = await waitUntil(() => {
+          const m = extMgr.lookup(targetUuid);
+          return m && m.stateObj ? m : null;
+        });
+        assertTrue(!!throwawayMeta, 'stateObj never appeared after enable() (normalize-config throwaway)');
+        const throwawayEntry = throwawayMeta.stateObj._configSwitches.showHoverPopup;
+        if (throwawayEntry.getValue()) {
+          throwawayEntry.item.toggle();
+        }
+        assertTrue(throwawayEntry.getValue() === false, 'failed to normalize showHoverPopup back to false (normalize-config throwaway)');
+        const throwawayOk2 = extMgr.disableExtension(targetUuid);
+        assertTrue(throwawayOk2 === true, `disableExtension (normalize-config throwaway) returned ${throwawayOk2}`);
+
+        // A raw uiGroup CHILD-COUNT comparison across this throwaway
+        // cycle's disable() and the real cycle's enable() below is NOT
+        // used here (unlike the single-session "off by default" and
+        // "repeated toggle" tests above, which stay within one unbroken
+        // session): two separate enable()/disable() cycles, with a real
+        // `await waitUntil()` poll in between, leave room for entirely
+        // unrelated GNOME Shell chrome (notification banners, etc.) to
+        // legitimately come or go and shift the total count for reasons
+        // that have nothing to do with this extension. The
+        // accessible_name-based check below is the count-independent
+        // equivalent: this feature's own popup actor always sets
+        // accessible_name to the SAME literal string (see
+        // _initHoverPopup()), so its absence is a precise, real,
+        // Clutter-level proof regardless of what else is in uiGroup.
+        const hasHoverPopupActor = () => Main.layoutManager.uiGroup.get_children().some((child) => child.accessible_name === 'Timezones hover popup');
+        assertFalse(hasHoverPopupActor(), 'a hover-popup actor already exists in uiGroup before the never-touched cycle even starts (test setup problem)');
+
+        const ok1 = extMgr.enableExtension(targetUuid);
+        assertTrue(ok1 === true, `enableExtension returned ${ok1}`);
+        const meta = await waitUntil(() => {
+          const m = extMgr.lookup(targetUuid);
+          return m && m.stateObj ? m : null;
+        });
+        assertTrue(!!meta, 'stateObj never appeared after enable() (never-enabled-hover setup)');
+        const instE = meta.stateObj;
+
+        // Never touch instE._configSwitches.showHoverPopup at all --
+        // the now-normalized persisted value (false) is left exactly
+        // as-is, so _initHoverPopup() is never called by
+        // _syncHoverPopupLifecycle() in _initMenu(), and the popup/signal
+        // genuinely never exist for the whole lifetime of THIS instance.
+        assertTrue(instE._config.showHoverPopup === false, 'test setup problem: showHoverPopup should be false after the normalize-config throwaway cycle');
+        assertTrue(instE._hoverPopup === null, 'a popup actor exists despite the toggle never being touched (test setup problem)');
+        assertTrue(instE._hoverSignalId === null, 'a notify::hover connection exists despite the toggle never being touched (test setup problem)');
+        assertFalse(hasHoverPopupActor(), 'a hover-popup actor exists in uiGroup right after enable() with the toggle never touched');
+
+        let threw = null;
+        try {
+          const ok2 = extMgr.disableExtension(targetUuid);
+          assertTrue(ok2 === true, `disableExtension returned ${ok2}`);
+        } catch (e) {
+          threw = e;
+        }
+        assertTrue(threw === null, `disable() after a never-enabled hover session threw: ${threw}`);
+
+        // Still nothing to show for it afterward either -- _teardownHoverPopup()
+        // (called unconditionally by disable()) was a genuine no-op the
+        // whole way through, not a silently-swallowed error.
+        assertTrue(instE._hoverPopup === null, '_hoverPopup is not null after disable() (never-enabled-hover session)');
+        assertTrue(instE._hoverPopupBox === null, '_hoverPopupBox is not null after disable() (never-enabled-hover session)');
+        assertTrue(instE._hoverShowTimeoutId === null, '_hoverShowTimeoutId is not null after disable() (never-enabled-hover session)');
+        assertTrue(instE._hoverSignalId === null, '_hoverSignalId is not null after disable() (never-enabled-hover session)');
+        assertFalse(hasHoverPopupActor(), 'a hover-popup actor exists in uiGroup after disable() following a never-enabled hover session');
+      }
+    );
 
     this._writeResults(results);
   }

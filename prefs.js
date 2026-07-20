@@ -213,6 +213,23 @@ export default class TimezonesPrefs extends ExtensionPreferences {
     showDateRow.subtitle = 'Adds each clock\'s current date to its popup-menu row (not the top-bar panel)';
     group.add(showDateRow);
 
+    // Hover-popup feature: another genuine 'config' a{sb} boolean, exactly
+    // the same read-modify-write shape as "Show date" immediately above --
+    // same 'config' key, same popup-menu-side switch counterpart
+    // (extension.js's `_addConfigSwitch({ label: 'Show all zones on
+    // hover', name: 'showHoverPopup' })`), same live two-way sync via the
+    // existing 'changed' gsettings listener in extension.js. OFF by
+    // default (feature requirement).
+    const showHoverPopupRow = this._buildBoldRow({
+      title: 'Show all zones on hover',
+      name: 'tzprefs-show-hover-popup',
+      active: Boolean(readConfig().showHoverPopup),
+      onChange: (v) => writeConfigField('showHoverPopup', v),
+    });
+    showHoverPopupRow.subtitle =
+      'Hovering the top-bar clock shows every active timezone, in panel order, each with its time and date';
+    group.add(showHoverPopupRow);
+
     // Live preview text for `value` against "right now", used by both the
     // curated-format ComboRow (baked into each entry's displayed string,
     // computed once at construction) and the custom-format EntryRow

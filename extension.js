@@ -10,6 +10,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import * as DND from 'resource:///org/gnome/shell/ui/dnd.js';
+import * as BoxPointer from 'resource:///org/gnome/shell/ui/boxpointer.js';
 
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
@@ -28,6 +29,7 @@ import {
 } from './formatting.js';
 import { SEPARATORS, resolveSeparatorValue } from './separators.js';
 import { resolveDateFormat, formatDateForDisplay } from './dateFormats.js';
+import { buildHoverPopupRows } from './hoverPopup.js';
 // KAREN-GATE FIX (round 4, live-testing report): formattingPresets.js
 // (FONT_SIZE_PRESETS/COLOR_PALETTE/resolvePresetId) was ONLY ever used by
 // the popup menu's own "Font size"/"Color" submenus (round 2), both
@@ -45,7 +47,18 @@ import { resolveDateFormat, formatDateForDisplay } from './dateFormats.js';
 // Whitelist of the only config keys this extension ever reads/writes.
 // Anything else present in the 'config' GSettings value (e.g. from a
 // tampered/foreign dconf entry) is ignored rather than blindly copied.
-const CONFIG_KEYS = ['format24', 'showCity', 'showTimezone', 'hideSystemClock', 'showSeparator', 'showDate'];
+const CONFIG_KEYS = ['format24', 'showCity', 'showTimezone', 'hideSystemClock', 'showSeparator', 'showDate', 'showHoverPopup'];
+
+// Delay (ms) between the pointer entering the panel button and the hover
+// popup actually opening -- mirrors the ordinary "tooltip" convention of
+// not popping something up on a merely transient hover/pass-through.
+// GLib.timeout_add()'s id is tracked in this._hoverShowTimeoutId and MUST
+// be removed via GLib.Source.remove() on hide, on disable(), and before
+// scheduling a new one -- see _scheduleHoverPopupShow()/
+// _cancelHoverPopupShowTimeout() below (a leaked timeout here is an
+// automatic e.g.o review failure, shexli EGO-L-003, exactly like every
+// other timer/signal this file already tracks explicitly).
+const HOVER_POPUP_SHOW_DELAY_MS = 400;
 
 // Minimum gap between consecutive console.error() calls logging a panel
 // markup parse failure (see _logMarkupFailureThrottled()). _updateLabel()
@@ -100,7 +113,18 @@ export default class TimezonesExtension extends Extension {
       // segment is shown at all) and NOT its own dedicated GSettings key
       // (unlike the "date-format" string key just below, which the actual
       // format pattern this toggle's date is rendered with comes from).
-      showDate: false
+      showDate: false,
+      // Hover-popup feature: a genuine 'config' a{sb} boolean, same
+      // shape/pattern as every switch above -- OFF by default (feature
+      // spec requirement). Whether hovering the panel clock shows a
+      // BoxPointer-based popup listing every ACTIVE zone in
+      // this._activeOrder order, each with its current time and date
+      // (reusing the SAME 'date-format' key/resolveDateFormat()/
+      // formatDateForDisplay() machinery every other date-rendering call
+      // site in this file already uses -- see hoverPopup.js). See
+      // _initHoverPopup()/_showHoverPopup()/_hideHoverPopup() below for
+      // the actor/timer/signal plumbing.
+      showHoverPopup: false
     };
     this._hint = '';
     this._labels = {};
@@ -191,6 +215,23 @@ export default class TimezonesExtension extends Extension {
     // _updateActiveMenu() rebuild (before removeAll() destroys the rows
     // these draggables belong to).
     this._rowDraggables = [];
+
+    // Hover-popup feature state (see _initHoverPopup() and
+    // _syncHoverPopupLifecycle()'s own comments further down): the
+    // BoxPointer actor + its row container, the pending show-delay
+    // GLib.timeout_add() id, and the panel button's own 'notify::hover'
+    // connection id. LAZY (karen-gate finding): all four stay null here
+    // and are only ever created by _initHoverPopup() when
+    // this._config.showHoverPopup is actually true -- never unconditionally
+    // on enable() -- and unconditionally torn down in disable() via
+    // _teardownHoverPopup() regardless of whether they were ever created,
+    // whether the feature is currently toggled on, and whether the popup
+    // happens to be showing or a show-timer is pending at the moment
+    // disable() runs (see disable()'s own comment).
+    this._hoverPopup = null;
+    this._hoverPopupBox = null;
+    this._hoverShowTimeoutId = null;
+    this._hoverSignalId = null;
 
     // Feature A: flatten cityAliases once into {key, zone, display} rows.
     // cityAliases values are [zone, displayName] tuples keyed by the
@@ -376,6 +417,15 @@ export default class TimezonesExtension extends Extension {
         this._updateLabel();
         this._syncConfigSwitches();
         this._syncMenuControls();
+        // External toggle path (karen-gate finding): showHoverPopup can
+        // be flipped from dconf/another instance of this same extension,
+        // not just this menu's own switch -- _loadSettings() above has
+        // already refreshed this._config.showHoverPopup by this point,
+        // so this call sees the new value and creates/destroys the popup
+        // to match, exactly like the switch's own setValue does for a
+        // menu-driven toggle. See _syncHoverPopupLifecycle()'s own
+        // comment for the full contract.
+        this._syncHoverPopupLifecycle();
       } finally {
         this._applyingExternalSettings = false;
       }
@@ -460,6 +510,19 @@ export default class TimezonesExtension extends Extension {
       this._menu.disconnect(this._menuOpenStateId);
     }
     this._menuOpenStateId = null;
+
+    // Hover popup teardown -- delegates to _teardownHoverPopup() (the
+    // SAME implementation _syncHoverPopupLifecycle() uses when the
+    // toggle is switched off at runtime, see its own comment) so there
+    // is exactly one teardown implementation, not two. Called
+    // unconditionally here, regardless of whether the toggle was ever
+    // switched on this session (the popup may never have been created at
+    // all -- _teardownHoverPopup() is a clean no-op in that case) and
+    // regardless of whether the popup happens to be showing or a
+    // show-timer happens to be pending right now (requirement: disable()
+    // must be safe mid-show or mid-pending-timer -- proven by the shell-
+    // driver's "hover teardown interleaving A/B/C" tests).
+    this._teardownHoverPopup();
 
     // Explicitly torn down before this._button.destroy() below (which
     // would also destroy it as a side effect, since it's parented inside
@@ -771,6 +834,27 @@ export default class TimezonesExtension extends Extension {
     // comment on this._separatorMenuItems above for why this popup avoids
     // adding more pickers than it can comfortably render).
     this._addConfigSwitch({ label: 'Show date', name: 'showDate' });
+    // Hover-popup feature: a 'config' a{sb} boolean switch, but with a
+    // custom setValue (unlike every switch above) so toggling it also
+    // drives the popup's own lazy create/destroy -- see
+    // _syncHoverPopupLifecycle()'s own comment for why this needs to be
+    // lazy at all (karen-gate finding: "off costs nothing" is a hard
+    // requirement -- HEAD carries no hidden actor/signal when this
+    // extension is used without the feature, and this extension must
+    // not either). The popup itself is NOT part of this._menu's own
+    // actor tree (see _initHoverPopup()): it is a separate, standalone
+    // BoxPointer added directly to Main.layoutManager.uiGroup, shown on
+    // panel-button hover rather than click, and now only ever created
+    // while the toggle is genuinely on.
+    this._addConfigSwitch({
+      label: 'Show all zones on hover',
+      name: 'showHoverPopup',
+      setValue: (value) => {
+        this._config.showHoverPopup = value;
+        this._saveSettings();
+        this._syncHoverPopupLifecycle();
+      }
+    });
 
     this._activeMenu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem('Active clocks'));
 
@@ -882,7 +966,318 @@ export default class TimezonesExtension extends Extension {
         inputFilter.set_text('');
         this._hint = '';
         this._updateMenu();
+        // Hover-popup feature: the main click-to-open menu and the hover
+        // popup must never be visible at the same time (design
+        // requirement -- avoids two competing BoxPointer-shaped popups
+        // fighting for the same screen space/attention). Cancel any
+        // pending show-timer too, so a hover that started just before the
+        // menu opened doesn't pop the hover popup up a moment later, on
+        // top of the now-open menu.
+        this._cancelHoverPopupShowTimeout();
+        this._hideHoverPopup();
       }
+    });
+
+    // Lazy by design (karen-gate finding): the popup actor/signal are
+    // only created here if the LOADED config already has the toggle on
+    // (this._loadSettings() -- see the constructor -- has already run by
+    // the time _initMenu() is called, so this._config.showHoverPopup is
+    // authoritative at this point). If the toggle is off, as it is by
+    // default, this call is a no-op -- see _syncHoverPopupLifecycle()'s
+    // own comment for the full lazy create/destroy contract.
+    this._syncHoverPopupLifecycle();
+  }
+
+  // --- Hover popup: "Show all zones on hover" ---
+  //
+  // DESIGN: a single BoxPointer (imports.ui.boxpointer / this file's own
+  // `BoxPointer` import), NOT a second PopupMenu.PopupMenu. this._button
+  // already owns a click-to-open PopupMenu (this._menu); giving the SAME
+  // actor a second menu-shaped popup with its own click/keyboard-grab
+  // semantics would fight the first one over input. A bare BoxPointer has
+  // none of that -- open()/close() just animate visibility and position,
+  // with no modal grab, no keyboard nav, no 'activate' handling -- so it
+  // coexists with this._menu cleanly. Built once in _initHoverPopup()
+  // (called from _syncHoverPopupLifecycle(), itself called from
+  // _initMenu() and from every toggle of the "Show all zones on hover"
+  // switch/gsetting) rather than freshly per-hover: unlike
+  // this._dropIndicator (a genuinely transient, created-and-destroyed-
+  // per-drag actor), this popup is shown/hidden repeatedly for as long as
+  // the toggle stays on, so building it once per "toggle turned on" and
+  // reusing it (rebuilding only its ROW CONTENT on each show, via
+  // _rebuildHoverPopupRows()) is the simpler, lower-churn choice --
+  // exactly how this._menu/this._activeMenu themselves are already
+  // handled (built once in _initMenu(), rows rebuilt on each open via
+  // _updateActiveMenu()).
+  //
+  // LAZY BY DESIGN (karen-gate finding): _initHoverPopup() -- and the
+  // 'notify::hover' connection it makes -- must NEVER run just because
+  // the extension was enabled. With the toggle off (the schema default),
+  // this extension must be byte-identical to HEAD in what it adds to
+  // Main.layoutManager.uiGroup and what it connects on this._button: no
+  // hidden actor, no permanently-live signal connection firing (and
+  // cheaply early-returning) on every panel hover. _syncHoverPopupLifecycle()
+  // is the single place that decides whether the popup should currently
+  // exist and creates/destroys it to match -- called from _initMenu()
+  // (using the config _loadSettings() already loaded), from the
+  // "Show all zones on hover" switch's own setValue (menu-driven
+  // toggle), and from the settings 'changed' handler in enable()
+  // (external/dconf-driven toggle) -- so there is exactly one code path
+  // that ever decides this, regardless of which of those three triggered
+  // it.
+  //
+  // ACTOR ALLOCATION: added directly to Main.layoutManager.uiGroup (the
+  // same parent PanelMenu.Button itself uses for this._menu.actor, see
+  // panelMenu.js's setMenu()) rather than anywhere inside this._button's
+  // own Clutter.FixedLayout tree -- a previous change in this codebase
+  // added an unpositioned child directly to a FixedLayout parent and
+  // produced a NaN allocation box plus continuous `Clutter-WARNING:
+  // needs an allocation` journal spam (see the karen-gate round-2 comment
+  // on this._labelStyleChangedId in enable()). BoxPointer sidesteps that
+  // entirely: it overrides vfunc_allocate() itself and computes its own
+  // real, finite allocation box from its source actor's live position
+  // (see boxpointer.js's _reposition()) whenever that source actor is
+  // mapped -- it does not depend on its PARENT's layout policy at all,
+  // exactly like this._menu.actor already doesn't. setPosition() is
+  // called once, right after construction below, before the popup is
+  // ever shown -- BoxPointer recomputes the real screen position from
+  // the live source-actor geometry on every subsequent open, so there is
+  // no need to call it again per show.
+
+  // Single source of truth for "should the hover-popup actor/signal
+  // currently exist". Idempotent in both directions: creating when
+  // already created, or tearing down when never created, are both
+  // no-ops (checked via this._hoverPopup's own presence, exactly the
+  // same "reference is the truth" discipline the rest of this file
+  // already uses for this._hoverShowTimeoutId/this._hoverSignalId).
+  // Called from three places, so the create/destroy decision is made in
+  // exactly one place regardless of which one triggers it:
+  //   1. _initMenu() (once per enable(), using whatever _loadSettings()
+  //      already loaded into this._config.showHoverPopup).
+  //   2. The "Show all zones on hover" switch's own setValue (a genuine
+  //      user click on the menu switch).
+  //   3. The settings 'changed' handler in enable() (an EXTERNAL toggle,
+  //      e.g. `gsettings set`/dconf-editor/another instance of this same
+  //      extension code -- this._config.showHoverPopup has already been
+  //      refreshed by that handler's own _loadSettings() call by the
+  //      time this runs).
+  // disable() does NOT call this -- it always tears down unconditionally
+  // via _teardownHoverPopup() directly, regardless of the toggle's
+  // current value, since by definition nothing should survive disable().
+  _syncHoverPopupLifecycle() {
+    if (this._config.showHoverPopup) {
+      if (!this._hoverPopup) {
+        this._initHoverPopup();
+      }
+    } else if (this._hoverPopup || this._hoverShowTimeoutId || this._hoverSignalId) {
+      this._teardownHoverPopup();
+    }
+  }
+
+  // The hover-popup teardown steps, extracted so there is exactly ONE
+  // implementation shared by disable() (which always calls this
+  // unconditionally, popup created or not -- see disable()'s own
+  // comment) and _syncHoverPopupLifecycle() (which calls this only when
+  // tearing down a live popup because the toggle was switched off).
+  // Every step here is already proven safe regardless of WHICH moment in
+  // the hover lifecycle it runs at (pending show-timer, popup genuinely
+  // showing, just hidden) -- see the shell-driver's "hover teardown
+  // interleaving A/B/C" tests -- and is safe to call when nothing was
+  // ever created at all (every step below is independently null-checked,
+  // so calling this on a never-initialized instance is a clean no-op):
+  //   1. Cancel any pending show-delay timeout FIRST -- otherwise it
+  //      could fire (calling _showHoverPopup(), which reads
+  //      this._config/this._activeOrder/this._stateByZone) after the
+  //      fields below are nulled, or after this._button/this._hoverPopup
+  //      are destroyed.
+  //   2. Disconnect the 'notify::hover' handler from this._button BEFORE
+  //      this._button.destroy() (in disable()) -- same discipline as
+  //      every other tracked signal in this file (this._signalId,
+  //      this._settingsChangedId, this._labelStyleChangedId).
+  //   3. Destroy this._hoverPopup itself (a real Clutter.Actor added to
+  //      Main.layoutManager.uiGroup in _initHoverPopup()) -- this also
+  //      destroys this._hoverPopupBox and every row actor inside it,
+  //      since they are its descendants; no separate destroy call is
+  //      needed for those.
+  _teardownHoverPopup() {
+    this._cancelHoverPopupShowTimeout();
+
+    if (this._button && this._hoverSignalId) {
+      this._button.disconnect(this._hoverSignalId);
+    }
+    this._hoverSignalId = null;
+
+    if (this._hoverPopup) {
+      this._hoverPopup.destroy();
+    }
+    this._hoverPopup = null;
+    this._hoverPopupBox = null;
+  }
+
+  _initHoverPopup() {
+    this._hoverPopup = new BoxPointer.BoxPointer(St.Side.TOP);
+    this._hoverPopup.style_class = 'popup-menu-boxpointer';
+    this._hoverPopup.add_style_class_name('popup-menu');
+    // Automation-friendly per project convention (see _addConfigSwitch()'s
+    // own comment on accessible_name): there is no interactive control
+    // inside this popup to name individually beyond the rows themselves
+    // (each row's own accessible_name is set in _rebuildHoverPopupRows()),
+    // but the container itself still gets a stable name for tooling.
+    this._hoverPopup.accessible_name = 'Timezones hover popup';
+
+    this._hoverPopupBox = new St.BoxLayout({
+      vertical: true,
+      style_class: 'popup-menu-content'
+    });
+    this._hoverPopup.bin.set_child(this._hoverPopupBox);
+
+    Main.layoutManager.uiGroup.add_child(this._hoverPopup);
+    this._hoverPopup.hide();
+    this._hoverPopup.setPosition(this._button, 0.5);
+
+    // track_hover is already true on every PanelMenu.Button (see this
+    // GNOME Shell's own panelMenu.js Button._init()), so this._button's
+    // own `hover` property already tracks pointer enter/leave for us --
+    // no separate enter-event/leave-event wiring needed. Explicitly
+    // connect-id-tracked and disconnected in disable(), same discipline
+    // as every other signal in this file (this._signalId,
+    // this._settingsChangedId, this._labelStyleChangedId,
+    // this._menuOpenStateId).
+    this._hoverSignalId = this._button.connect('notify::hover', () => this._onButtonHoverChanged());
+  }
+
+  // Reacts to the real, GObject-level `hover` property change on
+  // this._button (driven by track_hover -- see _initHoverPopup()'s
+  // comment). On hover-IN: schedules the show-delay timer (unless the
+  // feature is off, or the main click-to-open menu is currently open --
+  // suppression requirement). On hover-OUT: cancels any pending timer and
+  // hides the popup if it is currently showing. Any pending timer is
+  // always cancelled first, on EITHER transition, so a rapid enter/leave/
+  // enter sequence never accumulates more than one live timeout (timer
+  // discipline requirement).
+  _onButtonHoverChanged() {
+    this._cancelHoverPopupShowTimeout();
+
+    if (!this._button || !this._button.hover) {
+      this._hideHoverPopup();
+      return;
+    }
+
+    if (!this._config.showHoverPopup) {
+      return;
+    }
+
+    if (this._menu && this._menu.isOpen) {
+      return;
+    }
+
+    this._scheduleHoverPopupShow();
+  }
+
+  // Schedules _showHoverPopup() after HOVER_POPUP_SHOW_DELAY_MS. Any
+  // previously-scheduled timer is cancelled first (see
+  // _cancelHoverPopupShowTimeout()'s own comment) so this is always safe
+  // to call even if a timer is already pending -- never leaves two live
+  // timeouts. The id is nulled INSIDE the callback (before doing anything
+  // else) as well as by the cancel path, so a fired-and-completed timer
+  // is never mistaken for one still pending.
+  _scheduleHoverPopupShow() {
+    this._cancelHoverPopupShowTimeout();
+    this._hoverShowTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, HOVER_POPUP_SHOW_DELAY_MS, () => {
+      this._hoverShowTimeoutId = null;
+      this._showHoverPopup();
+      return GLib.SOURCE_REMOVE;
+    });
+  }
+
+  // Removes the pending show-delay timeout, if any, via
+  // GLib.Source.remove() (never left to fire after a hide/disable/
+  // reschedule -- shexli EGO-L-003, see HOVER_POPUP_SHOW_DELAY_MS's own
+  // comment) and nulls the tracking field. Idempotent: safe to call when
+  // no timer is pending.
+  _cancelHoverPopupShowTimeout() {
+    if (this._hoverShowTimeoutId) {
+      GLib.Source.remove(this._hoverShowTimeoutId);
+      this._hoverShowTimeoutId = null;
+    }
+  }
+
+  // Rebuilds this._hoverPopupBox's row content from the CURRENT
+  // this._activeOrder (so a reorder or an activate/deactivate that
+  // happened while the pointer was merely resting, before the popup was
+  // ever shown, is always reflected -- this is called fresh on every
+  // show, exactly like _updateActiveMenu() rebuilds this._activeMenu on
+  // every menu open) and opens the popup, UNLESS: the feature is off, the
+  // main menu is open, the popup actor doesn't exist (disable() raced
+  // ahead of a pending timer -- see disable()'s own comment), or there
+  // are zero active zones to show (an empty floating popup would be
+  // confusing, not informational). Every one of these guards is
+  // deliberately re-checked here (not just at schedule time in
+  // _onButtonHoverChanged()) so this method is itself safe to call
+  // directly -- exactly what the test suite's "show path" assertions do.
+  _showHoverPopup() {
+    if (!this._config || !this._config.showHoverPopup) {
+      return;
+    }
+    if (this._menu && this._menu.isOpen) {
+      return;
+    }
+    if (!this._hoverPopup || !this._hoverPopupBox) {
+      return;
+    }
+
+    this._rebuildHoverPopupRows();
+
+    if (this._hoverPopupBox.get_n_children() === 0) {
+      return;
+    }
+
+    // Matches PopupMenu.open()'s own z-ordering (see this GNOME Shell's
+    // popupMenu.js `PopupMenu.open()`): raise the popup above every other
+    // sibling in Main.layoutManager.uiGroup so it isn't hidden behind
+    // some other already-open shell chrome.
+    this._hoverPopup.get_parent().set_child_above_sibling(this._hoverPopup, null);
+    this._hoverPopup.open(BoxPointer.PopupAnimation.NONE);
+  }
+
+  // Closes the popup if it is currently visible. Idempotent (BoxPointer's
+  // own close() already no-ops when `!this.visible`, see boxpointer.js) --
+  // safe to call unconditionally from every suppression/teardown path
+  // (hover-out, main-menu-open, disable()).
+  _hideHoverPopup() {
+    if (this._hoverPopup && this._hoverPopup.visible) {
+      this._hoverPopup.close(BoxPointer.PopupAnimation.NONE);
+    }
+  }
+
+  // Destroys and rebuilds every row in this._hoverPopupBox from
+  // this._activeOrder, via the PURE buildHoverPopupRows() helper
+  // (hoverPopup.js) -- kept pure/shell-independent so the row-selection-
+  // and-ordering logic is unit-testable without a running gnome-shell
+  // (see tests/run-tests.js). Each row is a single PLAIN-TEXT St.Label
+  // (`.text`, never `.clutter_text.set_markup()`) -- see hoverPopup.js's
+  // own module-header comment for why this popup deliberately never
+  // touches the markup/escapeMarkup() surface at all: since nothing here
+  // is ever parsed as Pango markup, there is no injection path to defend
+  // against in the first place. This popup shows NO per-entry bold/size/
+  // color formatting (design requirement -- purely informational), so
+  // formatting.js's buildEntryMarkup()/getEffectiveFormatting() are never
+  // consulted here.
+  _rebuildHoverPopupRows() {
+    this._hoverPopupBox.get_children().forEach((child) => child.destroy());
+
+    let rows = buildHoverPopupRows({
+      activeOrder: this._activeOrder,
+      knownZones: this._stateByZone,
+      labels: this._labels,
+      config: this._config,
+      dateFormat: this._dateFormat
+    });
+
+    rows.forEach((row) => {
+      let label = new St.Label({ text: row.text });
+      label.accessible_name = row.text;
+      this._hoverPopupBox.add_child(label);
     });
   }
 

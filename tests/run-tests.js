@@ -39,6 +39,8 @@ import {
   formatDateForDisplay,
 } from '../dateFormats.js';
 
+import { buildHoverPopupRowText, buildHoverPopupRows } from '../hoverPopup.js';
+
 import GLib from 'gi://GLib';
 
 // Forced BEFORE any Gio.Settings object is constructed anywhere in this
@@ -1467,6 +1469,162 @@ test('getEffectiveFormatting: empty-string formattingDefaults (schema default, "
     assertTrue(text.includes(worstLabel), `recovered text did not contain the literal worst-case payload verbatim: ${JSON.stringify(text)}`);
   });
 }
+
+// ---------------------------------------------------------------------
+// hoverPopup.js: pure row-model logic for the "Show all zones on hover"
+// popup. Uses a fixed `now` per zone (via `nowForZone`) so every
+// assertion below is deterministic and never depends on the wall clock
+// at test-run time -- the same technique the formatDateForDisplay tests
+// above use for a single zone, extended here to per-zone injection since
+// buildHoverPopupRows() computes one GLib.DateTime per zone.
+// ---------------------------------------------------------------------
+
+test('buildHoverPopupRowText: includes the zone id (no custom label), the zone abbreviation, the time, and the date, in that order', () => {
+  const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
+  const text = buildHoverPopupRowText({
+    timezone: 'UTC',
+    label: undefined,
+    format24: true,
+    dateFormat: 'iso',
+    now: dt,
+  });
+  assertEqual(text, 'UTC UTC 09:05 (2026-07-20)');
+});
+
+test('buildHoverPopupRowText: a custom label is shown as "Label (zone id)", mirroring the "full" menu-row form', () => {
+  const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
+  const text = buildHoverPopupRowText({
+    timezone: 'UTC',
+    label: 'Home',
+    format24: true,
+    dateFormat: 'iso',
+    now: dt,
+  });
+  assertEqual(text, 'Home (UTC) UTC 09:05 (2026-07-20)');
+});
+
+test('buildHoverPopupRowText: respects format24=false (12h clock)', () => {
+  const dt = GLib.DateTime.new_utc(2026, 7, 20, 13, 5, 0);
+  const text = buildHoverPopupRowText({
+    timezone: 'UTC',
+    label: undefined,
+    format24: false,
+    dateFormat: 'iso',
+    now: dt,
+  });
+  assertTrue(text.includes('1:05 PM'), `expected a 12h-formatted time in: ${text}`);
+});
+
+test('buildHoverPopupRowText: date segment uses resolveDateFormat() -- a curated id resolves to its real pattern', () => {
+  const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
+  const isoText = buildHoverPopupRowText({ timezone: 'UTC', format24: true, dateFormat: 'iso', now: dt });
+  const weekdayText = buildHoverPopupRowText({ timezone: 'UTC', format24: true, dateFormat: 'weekday', now: dt });
+  assertTrue(isoText.includes('(2026-07-20)'), `expected ISO date addendum in: ${isoText}`);
+  assertTrue(weekdayText.includes('(Monday)'), `expected weekday date addendum in: ${weekdayText}`);
+  assertFalse(isoText === weekdayText, 'different date-format ids should produce different row text');
+});
+
+test('buildHoverPopupRowText: date segment is unconditional -- always appended regardless of any "showDate" concept (this module has no such gate)', () => {
+  const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
+  const text = buildHoverPopupRowText({ timezone: 'UTC', format24: true, dateFormat: '', now: dt });
+  assertTrue(/\(\d/.test(text), `expected a "(<date...>" addendum to always be present: ${text}`);
+});
+
+test('buildHoverPopupRows: returns one row per zone in activeOrder, in EXACT activeOrder order (not alphabetical, not membership-only)', () => {
+  const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
+  const activeOrder = ['America/New_York', 'UTC', 'Asia/Tokyo'];
+  const knownZones = new Set(['UTC', 'America/New_York', 'Asia/Tokyo']);
+  const rows = buildHoverPopupRows({
+    activeOrder,
+    knownZones,
+    labels: {},
+    config: { format24: true },
+    dateFormat: 'iso',
+    nowForZone: () => dt,
+  });
+  assertEqual(rows.map((r) => r.zone), activeOrder, 'row order must exactly match activeOrder, not any re-sorted order');
+});
+
+test('buildHoverPopupRows: reflects a reordered activeOrder (simulating _reorderActiveZone) without any extra work', () => {
+  const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
+  const knownZones = new Set(['UTC', 'America/New_York', 'Asia/Tokyo']);
+  const before = buildHoverPopupRows({
+    activeOrder: ['UTC', 'America/New_York', 'Asia/Tokyo'],
+    knownZones,
+    labels: {},
+    config: { format24: true },
+    dateFormat: 'iso',
+    nowForZone: () => dt,
+  });
+  const after = buildHoverPopupRows({
+    activeOrder: ['Asia/Tokyo', 'UTC', 'America/New_York'],
+    knownZones,
+    labels: {},
+    config: { format24: true },
+    dateFormat: 'iso',
+    nowForZone: () => dt,
+  });
+  assertEqual(before.map((r) => r.zone), ['UTC', 'America/New_York', 'Asia/Tokyo']);
+  assertEqual(after.map((r) => r.zone), ['Asia/Tokyo', 'UTC', 'America/New_York']);
+});
+
+test('buildHoverPopupRows: an activeOrder entry not present in knownZones (stale/foreign entry) is silently skipped, not a broken row', () => {
+  const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
+  const rows = buildHoverPopupRows({
+    activeOrder: ['UTC', 'Not/A_Real_Zone', 'Asia/Tokyo'],
+    knownZones: new Set(['UTC', 'Asia/Tokyo']),
+    labels: {},
+    config: { format24: true },
+    dateFormat: 'iso',
+    nowForZone: () => dt,
+  });
+  assertEqual(rows.map((r) => r.zone), ['UTC', 'Asia/Tokyo']);
+});
+
+test('buildHoverPopupRows: empty activeOrder produces zero rows', () => {
+  const rows = buildHoverPopupRows({
+    activeOrder: [],
+    knownZones: new Set(['UTC']),
+    labels: {},
+    config: { format24: true },
+    dateFormat: 'iso',
+  });
+  assertEqual(rows, []);
+});
+
+test('buildHoverPopupRows: per-zone custom labels are applied from the labels map, not shared across zones', () => {
+  const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
+  const rows = buildHoverPopupRows({
+    activeOrder: ['UTC', 'Asia/Tokyo'],
+    knownZones: new Set(['UTC', 'Asia/Tokyo']),
+    labels: { UTC: 'Home' },
+    config: { format24: true },
+    dateFormat: 'iso',
+    nowForZone: () => dt,
+  });
+  assertTrue(rows[0].text.startsWith('Home (UTC)'), `expected UTC row to use its custom label: ${rows[0].text}`);
+  assertTrue(rows[1].text.startsWith('Asia/Tokyo'), `expected Asia/Tokyo row to have no custom label: ${rows[1].text}`);
+});
+
+test('buildHoverPopupRows: row text never contains raw markup metacharacters as anything other than literal text (plain-text-only contract)', () => {
+  // Not an escaping test (this module never escapes anything -- see its
+  // own module-header comment: plain text is rendered via St.Label.text,
+  // never parsed as markup, so there is nothing to escape). This instead
+  // proves the CONTRACT: whatever a hostile label contains survives
+  // completely verbatim (no transformation at all), which is exactly
+  // what "never touches the markup surface" means in practice.
+  const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
+  const hostileLabel = '<b>evil</b> & "quotes" \'apos\'';
+  const rows = buildHoverPopupRows({
+    activeOrder: ['UTC'],
+    knownZones: new Set(['UTC']),
+    labels: { UTC: hostileLabel },
+    config: { format24: true },
+    dateFormat: 'iso',
+    nowForZone: () => dt,
+  });
+  assertTrue(rows[0].text.includes(hostileLabel), `expected the hostile label to survive completely verbatim: ${rows[0].text}`);
+});
 
 // ---------------------------------------------------------------------
 // summary
