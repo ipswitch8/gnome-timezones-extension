@@ -92,7 +92,7 @@
 // each cell for why that is safe.
 
 import GLib from 'gi://GLib';
-import { resolveDateFormat, formatDateForDisplay } from './dateFormats.js';
+import { resolveDateFormat, formatDateForDisplay, formatWeekday } from './dateFormats.js';
 import { sanitizeFormatting } from './formatting.js';
 
 /**
@@ -134,6 +134,21 @@ import { sanitizeFormatting } from './formatting.js';
  * @param {string} [params.dateFormat] - raw stored 'date-format' GSettings
  *   value, resolved here via resolveDateFormat() exactly like every other
  *   date-consuming call site in this project.
+ * @param {boolean} [params.showWeekday] - OPTIONAL 'config' a{sb} boolean
+ *   (the "Show weekday" toggle). When true, each cell's `dateText` is
+ *   prefixed with the locale-abbreviated short weekday (via
+ *   dateFormats.js's formatWeekday()) and a single space, e.g. "Wed
+ *   20/07/2026" instead of "20/07/2026". Built via a clean join of the
+ *   non-empty parts (never a naive string-concat) so a '' from either
+ *   formatWeekday() (failure) or dateText (failure/empty format) never
+ *   leaves a stray leading/trailing space. Defaults to false/falsy ->
+ *   dateText is completely unchanged from the pre-existing behavior (byte-
+ *   identical hover output for every caller not yet passing this param).
+ *   NOTE: if the caller's chosen date-format ALREADY includes a weekday
+ *   (e.g. the curated 'day-date-month'/'weekday' entries), enabling this
+ *   produces a mildly duplicated weekday -- deliberately not detected/
+ *   deduped here (fragile: would require parsing arbitrary %-format
+ *   strings), the same tradeoff the format itself already accepts.
  * @param {(zone: string) => GLib.DateTime} [params.nowForZone] - injectable
  *   per-zone "current time" resolver, for deterministic testing; defaults
  *   to `GLib.DateTime.new_now()` for the zone's own GLib.TimeZone.
@@ -166,6 +181,7 @@ export function buildHoverPopupCells({
   activeOrder,
   knownZones,
   dateFormat,
+  showWeekday,
   nowForZone,
   getEntrySegments,
   getFormatting,
@@ -190,7 +206,13 @@ export function buildHoverPopupCells({
 
     const glibTimezone = GLib.TimeZone.new(zone);
     const dateTime = nowForZone ? nowForZone(zone) : GLib.DateTime.new_now(glibTimezone);
-    const dateText = formatDateForDisplay(dateTime, formatString);
+    const rawDateText = formatDateForDisplay(dateTime, formatString);
+
+    // Clean join of non-empty parts only -- never a naive
+    // `${weekday} ${rawDateText}` concat, which would leave a stray
+    // leading/trailing space if either formatWeekday() or rawDateText
+    // fails/returns ''.
+    const dateText = showWeekday ? [formatWeekday(dateTime), rawDateText].filter((part) => part !== '').join(' ') : rawDateText;
 
     // A nullish/malformed getEntrySegments() result (including "omitted
     // entirely") falls back to citySeg: ''/zoneSeg: null -- the prior

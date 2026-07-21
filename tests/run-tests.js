@@ -38,6 +38,7 @@ import {
   getDateFormatById,
   resolveDateFormat,
   formatDateForDisplay,
+  formatWeekday,
 } from '../dateFormats.js';
 
 import { buildHoverPopupCells } from '../hoverPopup.js';
@@ -294,6 +295,31 @@ test('formatDateForDisplay: never throws for a non-string/empty formatString, fa
   assertEqual(formatDateForDisplay(dt, ''), formatDateForDisplay(dt, resolveDateFormat('')));
   assertEqual(formatDateForDisplay(dt, null), formatDateForDisplay(dt, resolveDateFormat('')));
   assertEqual(formatDateForDisplay(dt, undefined), formatDateForDisplay(dt, resolveDateFormat('')));
+});
+
+// ---------------------------------------------------------------------
+// dateFormats.js: formatWeekday -- the "Show weekday" hover-popup helper.
+// 2026-07-20 is a Monday -- an unambiguous fixed date. The expected
+// weekday string is derived INDEPENDENTLY below via a real, separate
+// GLib.DateTime.format('%a') call, not by re-deriving it from
+// formatDateForDisplay()/resolveDateFormat() (the code under test's own
+// machinery) and not from a hardcoded "Mon" that could drift by locale.
+// ---------------------------------------------------------------------
+
+test('formatWeekday: returns the real, independently-derived locale abbreviated weekday for a valid DateTime', () => {
+  const dt = GLib.DateTime.new_utc(2026, 7, 20, 12, 0, 0);
+  const expected = dt.format('%a'); // independent oracle: a fresh, direct GLib call
+  const result = formatWeekday(dt);
+  assertTrue(result !== '', 'formatWeekday must return a non-empty string for a valid DateTime');
+  assertEqual(result, expected, `formatWeekday should equal the real GLib.DateTime.format('%a') result: ${JSON.stringify(result)}`);
+});
+
+test('formatWeekday: returns \'\' (never throws) for a non-DateTime input', () => {
+  assertEqual(formatWeekday(null), '');
+  assertEqual(formatWeekday(undefined), '');
+  assertEqual(formatWeekday({}), '');
+  assertEqual(formatWeekday('2026-07-20'), '');
+  assertEqual(formatWeekday(42), '');
 });
 
 // ---------------------------------------------------------------------
@@ -1682,6 +1708,68 @@ test('buildHoverPopupCells: dateText comes verbatim from formatDateForDisplay --
     separatorValue: ' | ',
   });
   assertEqual(cells[0].dateText, expected, 'expected dateText to be exactly what formatDateForDisplay() returned, untouched');
+});
+
+// ---------------------------------------------------------------------
+// buildHoverPopupCells: `showWeekday` -- the "Show weekday" hover-popup
+// sub-option. Uses a fixed 2026-07-20 (a Monday) `now`, with the expected
+// weekday derived INDEPENDENTLY below via a real, separate
+// GLib.DateTime.format('%a') call, not by calling formatWeekday()/
+// buildHoverPopupCells() (the code under test) to produce its own
+// expectation.
+// ---------------------------------------------------------------------
+
+test('buildHoverPopupCells: showWeekday true prepends the independently-derived short weekday + a single space to dateText', () => {
+  const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
+  const expectedWeekday = dt.format('%a'); // independent oracle
+  const cellsOn = buildHoverPopupCells({
+    activeOrder: ['UTC'],
+    knownZones: new Set(['UTC']),
+    dateFormat: 'iso',
+    showWeekday: true,
+    nowForZone: () => dt,
+    separatorValue: ' | ',
+  });
+  const cellsOff = buildHoverPopupCells({
+    activeOrder: ['UTC'],
+    knownZones: new Set(['UTC']),
+    dateFormat: 'iso',
+    showWeekday: false,
+    nowForZone: () => dt,
+    separatorValue: ' | ',
+  });
+  assertEqual(cellsOn[0].dateText, `${expectedWeekday} 2026-07-20`, `expected weekday + space + date, got: ${JSON.stringify(cellsOn[0].dateText)}`);
+  assertEqual(cellsOff[0].dateText, '2026-07-20', 'showWeekday false must leave dateText completely unchanged');
+});
+
+test('buildHoverPopupCells: showWeekday omitted (undefined) leaves dateText unchanged, matching the pre-existing (pre-feature) behavior', () => {
+  const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
+  const cells = buildHoverPopupCells({
+    activeOrder: ['UTC'],
+    knownZones: new Set(['UTC']),
+    dateFormat: 'iso',
+    nowForZone: () => dt,
+    separatorValue: ' | ',
+  });
+  assertEqual(cells[0].dateText, '2026-07-20', 'omitting showWeekday must be byte-identical to the pre-feature dateText');
+});
+
+test('buildHoverPopupCells: showWeekday true applies independently, per-zone, in EXACT activeOrder order', () => {
+  const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
+  const expectedWeekday = dt.format('%a');
+  const cells = buildHoverPopupCells({
+    activeOrder: ['America/New_York', 'UTC'],
+    knownZones: new Set(['America/New_York', 'UTC']),
+    dateFormat: 'iso',
+    showWeekday: true,
+    nowForZone: () => dt,
+    separatorValue: ' | ',
+  });
+  const zoneCells = cells.filter((c) => c.type === 'zone');
+  assertEqual(zoneCells[0].zone, 'America/New_York');
+  assertEqual(zoneCells[1].zone, 'UTC');
+  assertEqual(zoneCells[0].dateText, `${expectedWeekday} 2026-07-20`, 'first zone cell should carry the prepended weekday too');
+  assertEqual(zoneCells[1].dateText, `${expectedWeekday} 2026-07-20`, 'second zone cell should carry the prepended weekday too');
 });
 
 // ---------------------------------------------------------------------

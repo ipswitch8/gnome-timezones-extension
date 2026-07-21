@@ -826,6 +826,28 @@ Covered:
     defaults. A real `_reorderActiveZone()` call is proven to change the
     cell order on the NEXT show, then the order is restored for the DnD
     section that follows.
+  - **"Show weekday" option**: an ordinary `config` a{sb} boolean
+    (`showWeekday`, OFF by default), toggled via its own popup-menu switch
+    ("Show weekday", `_addConfigSwitch()`'s default plain-boolean path --
+    no custom `setValue`, since the popup already rebuilds its rows fresh
+    on every show). When on, each 'zone' cell's DATE segment is prefixed
+    with the locale-abbreviated short weekday (`dateFormats.js`'s
+    `formatWeekday()`, GLib's locale-aware `%a` specifier -- never a
+    hardcoded English weekday table) and a single space, e.g. `"Wed
+    20/07/2026"` instead of `"20/07/2026"`; the CITY/ZONE label (when
+    present) still comes first, so the full cell reads e.g. `"UTC Wed
+    20/07/2026"`. Verified: baseline (toggle off) cell text matches the
+    pre-feature shape exactly; toggling the REAL switch on flips
+    `config.showWeekday` in the real gsetting and changes the NEXT show's
+    cell text to include the real, independently-derived (a fresh, direct
+    `GLib.DateTime.format('%a')` call -- never by calling
+    `formatWeekday()`/the popup's own machinery) short weekday immediately
+    before the date, for every active zone, not just the first; toggling
+    back off (still no reload) restores the exact pre-toggle text. The
+    pure prepend/join logic itself (`hoverPopup.js`'s `buildHoverPopupCells()`
+    `showWeekday` param, and `dateFormats.js`'s `formatWeekday()`) is
+    covered independently by `run-tests.js` (see above), including the
+    "no stray leading/trailing space" guard when either half is empty.
   - **Per-zone CSS formatting -- size/colour/bold, discriminating the
     city<->zone bold mapping**: a per-zone override (deliberately
     `boldCity=true`/`boldZone=FALSE` -- a SYMMETRIC case, e.g. both true

@@ -48,7 +48,7 @@ import { buildHoverPopupCells } from './hoverPopup.js';
 // Whitelist of the only config keys this extension ever reads/writes.
 // Anything else present in the 'config' GSettings value (e.g. from a
 // tampered/foreign dconf entry) is ignored rather than blindly copied.
-const CONFIG_KEYS = ['format24', 'showCity', 'showTimezone', 'hideSystemClock', 'showSeparator', 'showHoverPopup'];
+const CONFIG_KEYS = ['format24', 'showCity', 'showTimezone', 'hideSystemClock', 'showSeparator', 'showHoverPopup', 'showWeekday'];
 
 // Delay (ms) between the pointer entering the panel button and the hover
 // popup actually opening -- mirrors the ordinary "tooltip" convention of
@@ -117,7 +117,16 @@ export default class TimezonesExtension extends Extension {
       // already uses -- see hoverPopup.js). See _initHoverPopup()/
       // _showHoverPopup()/_hideHoverPopup() below for the actor/timer/
       // signal plumbing.
-      showHoverPopup: false
+      showHoverPopup: false,
+      // Hover-popup sub-option: an ordinary 'config' a{sb} boolean, same
+      // shape as every other switch here -- OFF by default. When true, the
+      // hover popup's DATE segment for every zone is prefixed with the
+      // locale-abbreviated short weekday ("Wed 20/07/2026" instead of
+      // "20/07/2026"), via dateFormats.js's formatWeekday(); see
+      // hoverPopup.js's buildHoverPopupCells() `showWeekday` param for the
+      // actual prepend logic. Has no effect while showHoverPopup itself is
+      // false (nothing reads it -- the popup isn't built at all).
+      showWeekday: false
     };
     this._hint = '';
     this._labels = {};
@@ -847,6 +856,13 @@ export default class TimezonesExtension extends Extension {
         this._syncHoverPopupLifecycle();
       }
     });
+    // Hover-popup sub-option: plain boolean, default _addConfigSwitch()
+    // path (unlike showHoverPopup above, this needs no lifecycle side
+    // effect -- the popup already rebuilds its rows from scratch on every
+    // show via _rebuildHoverPopupRow(), which reads this._config.showWeekday
+    // fresh each time, so a plain write + _saveSettings() is enough for
+    // toggling this to be reflected live on the next hover).
+    this._addConfigSwitch({ label: 'Show weekday', name: 'showWeekday' });
 
     this._activeMenu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem('Active clocks'));
 
@@ -1325,6 +1341,7 @@ export default class TimezonesExtension extends Extension {
       activeOrder: this._activeOrder,
       knownZones: this._stateByZone,
       dateFormat: this._dateFormat,
+      showWeekday: this._config.showWeekday,
       getEntrySegments: (zone) => this._getHoverPopupEntrySegments(zone),
       getFormatting: (zone) => this._getEffectiveFormatting(zone),
       separatorValue: this._resolveSeparatorValue()

@@ -40,8 +40,8 @@
 //
 // `<control>` is one of: global-size, global-color, global-bold-city,
 // global-bold-time, global-bold-zone, separator, size, color, bold-city,
-// bold-time, bold-zone, clear, expander, show-hover-popup, date-format,
-// date-format-custom.
+// bold-time, bold-zone, clear, expander, show-hover-popup, show-weekday,
+// date-format, date-format-custom.
 //
 // `<zoneId>` (per-zone widgets only) is the zone's IANA id with every '/'
 // replaced by '_' (see zoneToWidgetId() below), e.g. the zone
@@ -218,6 +218,22 @@ export default class TimezonesPrefs extends ExtensionPreferences {
     showHoverPopupRow.subtitle =
       'Hovering the top-bar clock shows a popup with the current date for every active timezone, in panel order';
     group.add(showHoverPopupRow);
+
+    // Hover-popup sub-option: same read-modify-write 'config' a{sb} boolean
+    // shape as showHoverPopupRow just above, writing 'showWeekday' instead.
+    // OFF by default (feature requirement). Has no visible effect unless
+    // "Show dates on hover" (above) is also on, since that is the only
+    // surface this option affects -- see hoverPopup.js's
+    // buildHoverPopupCells() `showWeekday` param.
+    const showWeekdayRow = this._buildBoldRow({
+      title: 'Show weekday',
+      name: 'tzprefs-show-weekday',
+      active: Boolean(readConfig().showWeekday),
+      onChange: (v) => writeConfigField('showWeekday', v),
+    });
+    showWeekdayRow.subtitle =
+      'Prefixes the hover-popup date with the short weekday (e.g. "Wed 20/07/2026")';
+    group.add(showWeekdayRow);
 
     // Live preview text for `value` against "right now", used by both the
     // curated-format ComboRow (baked into each entry's displayed string,

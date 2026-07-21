@@ -1651,6 +1651,90 @@ export default class ShellTestDriver extends Extension {
       inst._hideHoverPopup();
     });
 
+    record('hover popup: "Show weekday" toggle prepends the independently-derived locale short weekday to each zone cell\'s DATE text when on, and does not when off -- live, no reload needed', () => {
+      assertEqual(inst._activeOrder, ['UTC', 'America/New_York'], 'test setup problem: unexpected _activeOrder going into this test');
+      inst._settings.set_string('date-format', 'iso');
+      inst._loadSettings();
+      assertTrue(inst._config.showWeekday === false, 'test setup problem: expected showWeekday to default to false entering this test');
+
+      const weekdayEntry = inst._configSwitches.showWeekday;
+      assertTrue(!!weekdayEntry, 'no "showWeekday" config switch tracked -- the "Show weekday" menu switch was not added');
+
+      const glibTzUtc = GLib.TimeZone.new('UTC');
+      const glibTzNy = GLib.TimeZone.new('America/New_York');
+      const expectedFormat = targetModules.resolveDateFormat(inst._settings.get_string('date-format'));
+
+      // OFF (default): cell date text is unchanged (already covered above,
+      // re-asserted here as this section's own baseline so it discriminates
+      // independently of the earlier test).
+      inst._showHoverPopup();
+      let cells = inst._hoverPopupBox.get_children();
+      let [utcTextOff, , nyTextOff] = cells.map(cellText);
+      const expectedUtcDateOff = targetModules.formatDateForDisplay(GLib.DateTime.new_now(glibTzUtc), expectedFormat);
+      const expectedNyDateOff = targetModules.formatDateForDisplay(GLib.DateTime.new_now(glibTzNy), expectedFormat);
+      assertEqual(utcTextOff, expectedHoverCellText('UTC', expectedUtcDateOff), 'showWeekday off: UTC cell text should be unchanged from the pre-feature baseline');
+      assertEqual(nyTextOff, expectedHoverCellText('America/New_York', expectedNyDateOff), 'showWeekday off: NY cell text should be unchanged from the pre-feature baseline');
+      inst._hideHoverPopup();
+
+      // Flip the REAL switch (not a direct this._config write) -- proves
+      // the menu switch is actually wired to the popup's own rebuild path.
+      weekdayEntry.item.toggle();
+      assertTrue(weekdayEntry.getValue() === true, 'toggling "Show weekday" did not flip its stored value');
+      assertTrue(inst._settings.get_value('config').deep_unpack().showWeekday === true, 'the real "config" gsetting does not have showWeekday=true after toggling');
+
+      inst._showHoverPopup();
+      cells = inst._hoverPopupBox.get_children();
+      const [utcTextOn, , nyTextOn] = cells.map(cellText);
+
+      // Independent oracle: a real, separate GLib.DateTime.format('%a')
+      // call for "right now" in each zone -- NOT derived by calling
+      // formatWeekday()/the popup's own machinery.
+      const expectedUtcWeekday = GLib.DateTime.new_now(glibTzUtc).format('%a');
+      const expectedNyWeekday = GLib.DateTime.new_now(glibTzNy).format('%a');
+      const expectedUtcDateOn = targetModules.formatDateForDisplay(GLib.DateTime.new_now(glibTzUtc), expectedFormat);
+      const expectedNyDateOn = targetModules.formatDateForDisplay(GLib.DateTime.new_now(glibTzNy), expectedFormat);
+
+      // The weekday is part of the DATE segment, which comes AFTER the
+      // city/zone label (schema default: "UTC"/"New York") -- so the
+      // discriminating check is that "<weekday> <date>" appears together,
+      // immediately preceding the date, not that the whole cell text
+      // starts with it (label ordering is already covered by the earlier
+      // "with the toggle ON" test above).
+      assertTrue(
+        utcTextOn.includes(`${expectedUtcWeekday} ${expectedUtcDateOn}`),
+        `showWeekday on: UTC cell text should contain the real short weekday immediately before the date, got: ${JSON.stringify(utcTextOn)}`
+      );
+      assertTrue(
+        nyTextOn.includes(`${expectedNyWeekday} ${expectedNyDateOn}`),
+        `showWeekday on: NY cell text should contain the real short weekday immediately before the date, got: ${JSON.stringify(nyTextOn)}`
+      );
+      assertTrue(utcTextOn !== utcTextOff, 'showWeekday on: UTC cell text must differ from the showWeekday-off baseline');
+      assertTrue(nyTextOn !== nyTextOff, 'showWeekday on: NY cell text must differ from the showWeekday-off baseline');
+      assertEqual(
+        utcTextOn,
+        expectedHoverCellText('UTC', `${expectedUtcWeekday} ${expectedUtcDateOn}`),
+        `showWeekday on: full UTC cell text mismatch: ${JSON.stringify(utcTextOn)}`
+      );
+      assertEqual(
+        nyTextOn,
+        expectedHoverCellText('America/New_York', `${expectedNyWeekday} ${expectedNyDateOn}`),
+        `showWeekday on: full NY cell text mismatch: ${JSON.stringify(nyTextOn)}`
+      );
+      inst._hideHoverPopup();
+
+      // Toggle back off and re-show WITHOUT any reload -- proves the
+      // popup rebuild reads this._config.showWeekday fresh every show,
+      // rather than caching the weekday-on state from the prior show.
+      weekdayEntry.item.toggle();
+      assertTrue(weekdayEntry.getValue() === false, 'toggling "Show weekday" back off did not flip its stored value');
+      inst._showHoverPopup();
+      cells = inst._hoverPopupBox.get_children();
+      const [utcTextRestored, , nyTextRestored] = cells.map(cellText);
+      assertEqual(utcTextRestored, utcTextOff, 'showWeekday toggled back off (no reload) should restore the exact pre-toggle UTC cell text');
+      assertEqual(nyTextRestored, nyTextOff, 'showWeekday toggled back off (no reload) should restore the exact pre-toggle NY cell text');
+      inst._hideHoverPopup();
+    });
+
     record(
       'hover popup: cell labels track "Show city name"/"Show timezone" LIVE -- toggling either switch and re-showing changes the label accordingly (city-only, both -- in the correct city-THEN-zone order, zone-only, neither), never cached from an earlier show',
       () => {

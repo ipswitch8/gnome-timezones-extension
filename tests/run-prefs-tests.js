@@ -283,6 +283,7 @@ function expectedWidgetNamesFor(zones) {
     'tzprefs-defaults-group',
     'tzprefs-separator',
     'tzprefs-show-hover-popup',
+    'tzprefs-show-weekday',
     'tzprefs-date-format',
     'tzprefs-date-format-custom',
     'tzprefs-global-size',
@@ -559,6 +560,63 @@ const KNOWN_ZONES = ['UTC', 'America/Los_Angeles'];
         return;
       }
       assertEqual(config[key], beforeConfig[key], `config.${key} must be untouched by the hover-popup switch`);
+    });
+  });
+}
+
+// =====================================================================
+// Suite 1c-3: "Show weekday" switch (hover-popup sub-option, prefixes the
+// hover date with the locale-abbreviated short weekday). Same
+// read-modify-write 'config' a{sb} discipline as "Show dates on hover"
+// above.
+// =====================================================================
+
+{
+  const settings = newSettings();
+  settings.set_strv('timezones', KNOWN_ZONES);
+  settings.set_value(
+    'config',
+    new GLib.Variant('a{sb}', {
+      format24: true,
+      showCity: true,
+      showTimezone: false,
+      hideSystemClock: false,
+      showSeparator: false,
+      showHoverPopup: true,
+      showWeekday: true,
+    })
+  );
+
+  const prefsObj = new TimezonesPrefs();
+  prefsObj.getSettings = () => settings;
+  const window = new Adw.PreferencesWindow();
+  prefsObj.fillPreferencesWindow(window);
+
+  test('"Show weekday" SwitchRow displays the current config.showWeekday value (true)', () => {
+    const widget = findByName(window, 'tzprefs-show-weekday');
+    assertTrue(widget !== null, 'tzprefs-show-weekday not found');
+    assertEqual(widget.active, true, 'Show weekday switch should display true');
+  });
+
+  test('toggling the real "Show weekday" switch writes config.showWeekday and NOT date-format/formatting-defaults/other config fields', () => {
+    const widget = findByName(window, 'tzprefs-show-weekday');
+    const beforeDateFormat = settings.get_string('date-format');
+    const beforeFormattingDefaults = settings.get_string('formatting-defaults');
+    const beforeConfig = settings.get_value('config').deep_unpack();
+
+    widget.active = false;
+
+    const config = settings.get_value('config').deep_unpack();
+    assertEqual(config.showWeekday, false, 'config.showWeekday should now be false');
+    assertEqual(settings.get_string('date-format'), beforeDateFormat, 'date-format must be untouched by the show-weekday switch');
+    assertEqual(settings.get_string('formatting-defaults'), beforeFormattingDefaults, 'formatting-defaults must be untouched by the show-weekday switch');
+    // Every OTHER config field must be untouched -- proves this is a
+    // genuine read-modify-write, not an overwrite of the whole key.
+    Object.keys(beforeConfig).forEach((key) => {
+      if (key === 'showWeekday') {
+        return;
+      }
+      assertEqual(config[key], beforeConfig[key], `config.${key} must be untouched by the show-weekday switch`);
     });
   });
 }

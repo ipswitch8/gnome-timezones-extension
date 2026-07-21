@@ -155,6 +155,25 @@ function tryFormat(dateTime, fmt) {
  * incorrect (and misleadingly redundant) for its one current plain-text
  * caller.
  */
+/**
+ * Pure helper: returns the LOCALIZED, abbreviated (short) weekday name for
+ * `dateTime` (a GLib.DateTime), e.g. "Wed"/"Thu" in the `en` locale -- used
+ * by the "Show weekday" hover-popup option (see hoverPopup.js's
+ * buildHoverPopupCells()) to optionally prepend a short weekday to the
+ * popup's date text.
+ *
+ * Deliberately reuses GLib's own `%a` specifier (the locale's abbreviated
+ * weekday name) via formatDateForDisplay() rather than a hardcoded English
+ * weekday table -- `%a` is locale-aware (this project must not hardcode
+ * English weekday names), and reusing formatDateForDisplay() means this
+ * inherits the exact same null-safety/never-throws contract (invalid
+ * `dateTime` -> '', GLib.DateTime.format() failure -> '') for free, with no
+ * second failure-handling implementation to keep in sync.
+ */
+export function formatWeekday(dateTime) {
+  return formatDateForDisplay(dateTime, '%a');
+}
+
 export function formatDateForDisplay(dateTime, formatString) {
   if (!(dateTime instanceof GLib.DateTime)) {
     return '';
