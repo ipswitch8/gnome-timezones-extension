@@ -342,6 +342,75 @@ export function getEffectiveFormatting(zone, formattingMap, formattingDefaults) 
 // functions only assemble and (for the markup variant) escape/format them.
 
 /**
+ * The single implementation of this project's segment ORDER/PRESENCE
+ * rule, shared by ALL THREE of this project's entry renderers:
+ *   1. the panel/menu's plain-text join (joinEntrySegments()/
+ *      buildEntryText() below),
+ *   2. the panel's Pango-markup form (buildEntryMarkup() further below,
+ *      whose `last` slot is the TIME segment), and
+ *   3. the hover popup's per-segment-actor rendering (extension.js's
+ *      _buildHoverZoneCell(), whose `last` slot is instead the DATE --
+ *      see that method's own comment for why it needs separate St.Label
+ *      actors per segment for independent bold, rather than a joined
+ *      string, and so cannot just call joinEntrySegments()/
+ *      buildEntryMarkup() directly).
+ * This is the ONE place that decides: city always occupies the first slot
+ * (even as `''` -- a hidden/empty city is still a real slot, not omitted,
+ * matching the legacy `_getLabelForTimezone` shape exactly), zone occupies
+ * the next slot only when non-null/non-undefined (the "Show timezone"
+ * toggle's off state), and `last` (time for the panel/menu forms, date
+ * for the hover popup -- callers must not confuse the two meanings) always
+ * occupies the final slot (even as `''`). Each item is tagged with its
+ * `kind` so a caller that needs to tell city/zone/last apart (bold
+ * wrapping in both buildEntryMarkup() and the hover popup, for independent
+ * boldCity/boldZone/boldTime) never has to re-derive that identity itself.
+ *
+ * @param {object} params
+ * @param {string} [params.city]
+ * @param {(string|null|undefined)} [params.zone]
+ * @param {string} [params.last]
+ * @returns {Array<{ kind: 'city'|'zone'|'last', text: string }>}
+ */
+export function orderedEntrySegments({ city, zone, last }) {
+  const cityStr = city ?? '';
+  const lastStr = last ?? '';
+
+  const segments = [{ kind: 'city', text: cityStr }];
+
+  if (zone !== null && zone !== undefined) {
+    segments.push({ kind: 'zone', text: zone });
+  }
+
+  segments.push({ kind: 'last', text: lastStr });
+
+  return segments;
+}
+
+/**
+ * The single implementation of this project's segment-JOINING rule:
+ * joins orderedEntrySegments()'s ordered `text` values with a single
+ * space -- city/alias, then zone abbreviation (when shown), then a final
+ * trailing segment (time for the panel/menu forms, nothing at all for the
+ * hover popup's city+zone-only label -- see hoverPopup.js's
+ * buildHoverPopupCells(), which calls this with `last: ''` and trims the
+ * result to get "just the city(+zone)" text without a second, drifting
+ * implementation of this join). Byte-identical to the pre-Phase-2 legacy
+ * `_getLabelForTimezone` shape: always exactly ONE space between
+ * whichever of city/zone/last are concatenated (a plain
+ * `Array.prototype.join(' ')` over orderedEntrySegments()'s fixed-slot
+ * list reproduces that exactly, including a leading/trailing space when
+ * city/last is `''` -- there is no filtering here, unlike the hover
+ * popup's own per-segment rendering, which DOES skip an empty city slot
+ * entirely; see _buildHoverZoneCell()'s own comment for why that
+ * difference is correct and not a re-divergence of this shared rule).
+ */
+function joinEntrySegments({ city, zone, last }) {
+  return orderedEntrySegments({ city, zone, last })
+    .map((segment) => segment.text)
+    .join(' ');
+}
+
+/**
  * Assemble the plain-text (no markup) form of an entry. Byte-identical
  * to the pre-Phase-2 legacy `_getLabelForTimezone` output for the same
  * inputs -- used for the 'full' form consumed by menu rows and the drag
@@ -349,14 +418,7 @@ export function getEffectiveFormatting(zone, formattingMap, formattingDefaults) 
  * markup syntax.
  */
 export function buildEntryText({ city, zone, time }) {
-  const cityStr = city ?? '';
-  const timeStr = time ?? '';
-
-  if (zone === null || zone === undefined) {
-    return `${cityStr} ${timeStr}`;
-  }
-
-  return `${cityStr} ${zone} ${timeStr}`;
+  return joinEntrySegments({ city, zone, last: time });
 }
 
 // Wraps already-escaped text in a <b>...</b> span when `bold` is true.
@@ -379,16 +441,25 @@ function boldSegment(escapedText, bold) {
 export function buildEntryMarkup({ city, zone, time }, fmt) {
   const f = sanitizeFormatting(fmt);
 
-  const citySeg = boldSegment(escapeMarkup(city ?? ''), f.boldCity);
-  const timeSeg = boldSegment(escapeMarkup(time ?? ''), f.boldTime);
+  // WHICH segments, in WHAT ORDER, comes from the shared
+  // orderedEntrySegments() -- the SAME presence/order decision
+  // joinEntrySegments()/buildEntryText() above and extension.js's
+  // _buildHoverZoneCell() (the hover popup) both consume -- rather than
+  // this function re-checking `zone === null || zone === undefined`
+  // itself. `last` here is the TIME segment (contrast the hover popup's
+  // own consumption of this same helper, where `last` is the DATE and is
+  // deliberately NEVER bold -- see that method's own comment), so
+  // `boldTime` is what wraps this path's `last`-kind segment. Escaping
+  // (`escapeMarkup`) and per-segment bold wrapping (`boldSegment`) are
+  // applied to each segment's raw `text` exactly as before -- only the
+  // "which segments/order" decision moved into the shared helper; the
+  // assembled `inner` string (and everything below it) is unchanged byte
+  // for byte.
+  const boldForKind = { city: f.boldCity, zone: f.boldZone, last: f.boldTime };
 
-  let inner;
-  if (zone === null || zone === undefined) {
-    inner = `${citySeg} ${timeSeg}`;
-  } else {
-    const zoneSeg = boldSegment(escapeMarkup(zone), f.boldZone);
-    inner = `${citySeg} ${zoneSeg} ${timeSeg}`;
-  }
+  const inner = orderedEntrySegments({ city, zone, last: time })
+    .map((segment) => boldSegment(escapeMarkup(segment.text), boldForKind[segment.kind]))
+    .join(' ');
 
   const attrs = [];
 

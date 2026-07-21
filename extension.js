@@ -21,11 +21,13 @@ import {
   parseFormatting,
   sanitizeFormatting,
   sanitizeColor,
+  sanitizeFontSize,
   serializeFormatting,
   DEFAULT_FORMATTING,
   buildEntryText,
   buildEntryMarkup,
   getEffectiveFormatting,
+  orderedEntrySegments,
 } from './formatting.js';
 import { SEPARATORS, resolveSeparatorValue } from './separators.js';
 import { buildHoverPopupCells } from './hoverPopup.js';
@@ -1247,26 +1249,26 @@ export default class TimezonesExtension extends Extension {
     }
   }
 
-  // Computes the hover popup's per-zone LABEL text -- the city and/or
-  // zone-abbreviation segments the panel itself would show for `zone`
-  // (respecting the "Show city name"/"Show timezone" toggles and any
-  // custom per-zone label/alias), with the TIME segment dropped, joined
-  // with the SAME spacing rule buildEntryText() (formatting.js) already
-  // uses for city+zone -- this deliberately does not reimplement that
-  // join rule a second time: passing `time: ''` through the real
-  // buildEntryText() means its own `${cityStr} ${timeStr}` / `${cityStr}
-  // ${zone} ${timeStr}` branches already produce the correct city(+zone)
-  // text with exactly one trailing space (from the empty time segment),
-  // which is then trimmed. Returns '' when both segments are empty (both
-  // toggles off, no custom label) -- exactly the "date-only" fallback
-  // _rebuildHoverPopupRow() below falls back to for an empty labelText.
-  _getHoverPopupLabelText(zone) {
+  // Computes the hover popup's per-zone CITY/ZONE segments -- exactly
+  // what the panel itself would show for `zone` (respecting the "Show
+  // city name"/"Show timezone" toggles and any custom per-zone
+  // label/alias), with the TIME segment dropped entirely. Returned as
+  // SEPARATE `{city, zone}` segments (not a pre-joined string) so
+  // _rebuildHoverPopupRow() below can render each as its own St.Label and
+  // apply bold independently per segment (see buildHoverPopupCells()'s
+  // own comment on why the pure model needs them separate). `zone` is
+  // `null` when the zone-abbreviation segment is hidden (the "Show
+  // timezone" toggle's off state) -- the SAME convention
+  // _computeEntrySegments() itself already uses. Returns `null` when
+  // `zone` is not a currently-known active zone (defensive; mirrors the
+  // prior '' fallback for an unresolvable zone).
+  _getHoverPopupEntrySegments(zone) {
     let item = this._stateByZone.get(zone);
     if (!item) {
-      return '';
+      return null;
     }
     let segments = this._computeEntrySegments({ item, full: false });
-    return buildEntryText({ city: segments.city, zone: segments.zone, time: '' }).trim();
+    return { city: segments.city, zone: segments.zone };
   }
 
   // Destroys and rebuilds every child in this._hoverPopupBox from
@@ -1275,42 +1277,47 @@ export default class TimezonesExtension extends Extension {
   // selection-and-ordering logic is unit-testable without a running
   // gnome-shell (see tests/run-tests.js).
   //
-  // ONE LINE, LABEL + DATE: each cell returned by buildHoverPopupCells()
-  // (a 'date' cell: that zone's LABEL text -- see
-  // _getHoverPopupLabelText() above, passed in as the `getLabelText`
-  // callback so this popup never re-derives the showCity/showTimezone/
-  // custom-label decision itself -- followed by its current date text,
-  // or a 'separator' cell: the panel's own separator literal) becomes a
-  // single PLAIN-TEXT St.Label, appended left-to-right into
-  // this._hoverPopupBox (a HORIZONTAL box, see _initHoverPopup()). There
-  // is deliberately still no per-zone TIME text here, and therefore no
-  // column-alignment machinery is needed -- an ordinary horizontal box of
-  // labels, in the same order and with the same separator literal the
-  // panel itself uses, already reads as "the dates for the zones you see
-  // above, in the same order, each one labeled the same way the panel
-  // labels it" without needing to line each date up pixel-for-pixel under
-  // its own zone's panel entry (the panel is a single combined label, not
-  // one label per zone, so per-zone alignment against it would have no
-  // stable target to align to in the first place).
+  // ONE LINE, PER-ZONE FORMATTED SEGMENTS + DATE: each cell returned by
+  // buildHoverPopupCells() is either a 'zone' cell (rendered via
+  // _buildHoverZoneCell() below -- a small horizontal box of that zone's
+  // CITY/ZONE/DATE segment labels, each carrying that zone's EFFECTIVE
+  // size/colour/bold, see that method's own comment) or a 'separator'
+  // cell (the panel's own separator literal, rendered exactly as before:
+  // a single plain, UNFORMATTED St.Label -- separators are never
+  // per-zone, so they are deliberately never touched by any zone's
+  // formatting). There is deliberately still no per-zone TIME text here,
+  // and therefore no column-alignment machinery is needed -- an ordinary
+  // horizontal box of cells, in the same order and with the same
+  // separator literal the panel itself uses, already reads as "the dates
+  // for the zones you see above, in the same order, each one labeled and
+  // styled the same way the panel labels/styles it" without needing to
+  // line each date up pixel-for-pixel under its own zone's panel entry
+  // (the panel is a single combined label, not one label per zone, so
+  // per-zone alignment against it would have no stable target to align
+  // to in the first place).
   //
-  // LIVE TOGGLES: _getHoverPopupLabelText() is called fresh, right here,
-  // on every call to this method -- which itself runs fresh on every
-  // popup show (see _showHoverPopup()) -- so it always reads the CURRENT
-  // this._config.showCity/showTimezone and this._labels at show time.
-  // Nothing about the label is cached across shows, so toggling "Show
-  // city name"/"Show timezone" and then hovering again always reflects
-  // the change with no separate refresh wiring needed.
+  // LIVE TRACKING: _getHoverPopupEntrySegments()/_getEffectiveFormatting()
+  // are both called fresh, right here, on every call to this method --
+  // which itself runs fresh on every popup show (see _showHoverPopup())
+  // -- so this always reads the CURRENT this._config.showCity/
+  // showTimezone/this._labels AND the CURRENT this._formatting/
+  // this._formattingDefaults at show time. Nothing about a cell's
+  // segments or formatting is cached across shows (each show destroys
+  // every previous child via the .destroy() loop below and rebuilds from
+  // scratch), so toggling "Show city name"/"Show timezone" or editing a
+  // zone's size/colour/bold in prefs and then hovering again always
+  // reflects the change with no separate refresh wiring needed.
   //
-  // PLAIN TEXT ONLY: every label uses `.text` (`new St.Label({ text })`),
-  // never `.clutter_text.set_markup()` -- see hoverPopup.js's own
-  // module-header comment for why this popup deliberately never touches
-  // the markup/escapeMarkup() surface at all: since nothing here is ever
-  // parsed as Pango markup, there is no injection path to defend against
-  // in the first place -- a hostile custom label's markup metacharacters
-  // reach `label.text` completely verbatim. This popup shows NO
-  // per-entry bold/size/color formatting (design requirement -- purely
-  // informational), so formatting.js's buildEntryMarkup()/
-  // getEffectiveFormatting() are never consulted here.
+  // PLAIN TEXT + CSS ONLY, NEVER MARKUP: every label uses `.text`
+  // (`new St.Label({ text })`) and, when non-neutral, a CSS `style`
+  // string (`set_style()`/the constructor `style` property) for
+  // size/colour/bold -- never `.clutter_text.set_markup()`. See
+  // hoverPopup.js's own module-header comment for why this popup
+  // deliberately never touches the markup/escapeMarkup() surface at all:
+  // since nothing here is ever parsed as Pango markup, there is no
+  // injection path to defend against in the first place -- a hostile
+  // custom label's markup metacharacters reach `label.text` completely
+  // verbatim, in whichever segment label they belong to.
   _rebuildHoverPopupRow() {
     this._hoverPopupBox.get_children().forEach((child) => child.destroy());
 
@@ -1318,27 +1325,133 @@ export default class TimezonesExtension extends Extension {
       activeOrder: this._activeOrder,
       knownZones: this._stateByZone,
       dateFormat: this._dateFormat,
-      getLabelText: (zone) => this._getHoverPopupLabelText(zone),
+      getEntrySegments: (zone) => this._getHoverPopupEntrySegments(zone),
+      getFormatting: (zone) => this._getEffectiveFormatting(zone),
       separatorValue: this._resolveSeparatorValue()
     });
 
     cells.forEach((cell) => {
-      let text;
       if (cell.type === 'separator') {
-        text = cell.text;
-      } else {
-        text = cell.labelText ? `${cell.labelText} ${cell.dateText}` : cell.dateText;
+        let label = new St.Label({
+          text: cell.text,
+          x_align: Clutter.ActorAlign.FILL,
+          style: 'text-align: center;'
+        });
+        label.accessible_name = `Separator: ${cell.text}`;
+        this._hoverPopupBox.add_child(label);
+        return;
       }
 
-      let label = new St.Label({
-        text,
-        x_align: Clutter.ActorAlign.FILL,
-        style: 'text-align: center;'
-      });
-      label.accessible_name = cell.type === 'separator' ? `Separator: ${text}` : text;
-
-      this._hoverPopupBox.add_child(label);
+      this._hoverPopupBox.add_child(this._buildHoverZoneCell(cell));
     });
+  }
+
+  // Builds the CSS `style` string for one hover-popup segment label, from
+  // a cell's sanitized `fmt` (see buildHoverPopupCells()'s own comment)
+  // and whether THIS specific segment should render bold. size/colour are
+  // re-sanitized here via sanitizeFontSize()/sanitizeColor() -- defense in
+  // depth, matching every other formatting.js consumer in this file, even
+  // though hoverPopup.js already sanitized `fmt` once. A neutral value
+  // (size 0 / colour '') omits its own CSS property entirely, so the
+  // label simply inherits the popup's theme default -- exactly like an
+  // unconfigured panel entry's markup omits its <span> attributes
+  // entirely (see buildEntryMarkup()'s own comment in formatting.js).
+  // Returns '' (never null) when nothing needs overriding, so callers can
+  // always pass the result straight into an St.Label's `style` property.
+  _hoverSegmentStyle(fmt, bold) {
+    let parts = [];
+
+    let size = sanitizeFontSize(fmt.size);
+    if (size !== 0) {
+      // St CSS 'font-size' takes a plain point size, unlike Pango
+      // markup's 1024ths-of-a-point 'size' attribute (see
+      // buildEntryMarkup()'s comment in formatting.js) -- no unit
+      // conversion needed here.
+      parts.push(`font-size: ${size}pt;`);
+    }
+
+    let color = sanitizeColor(fmt.color);
+    if (color !== '') {
+      parts.push(`color: ${color};`);
+    }
+
+    if (bold) {
+      parts.push('font-weight: bold;');
+    }
+
+    return parts.join(' ');
+  }
+
+  // Builds one 'zone' cell's actor: a horizontal St.BoxLayout containing
+  // up to three plain-text St.Labels -- CITY, ZONE-abbreviation, and DATE
+  // -- with a plain spacer St.Label holding a single space between any
+  // two ADJACENT segments that are actually present. WHICH segments exist
+  // and in WHAT ORDER comes from formatting.js's own
+  // orderedEntrySegments() -- the SAME shared decision
+  // joinEntrySegments()/buildEntryText() (the panel/menu's plain-text
+  // join) is built on -- rather than this method re-deriving that
+  // presence/order rule a second time. This method itself only adds the
+  // ONE thing orderedEntrySegments() cannot decide for it: whether to
+  // actually render a given slot as a visible label. It drops an empty
+  // CITY slot entirely (no label, no surrounding spacer) -- unlike the
+  // panel/menu join, which keeps an empty city as a literal '' segment
+  // (still contributing its leading space to the joined STRING, since a
+  // plain-text entry has no visual "just don't render this part" option a
+  // string join can express) -- unable to just call joinEntrySegments()
+  // directly for that same reason: this popup needs SEPARATE actors per
+  // segment for independent per-segment bold (boldCity/boldZone), which a
+  // joined string cannot provide.
+  //
+  // CITY gets CSS `font-weight: bold` when `cell.fmt.boldCity`; ZONE gets
+  // it when `cell.fmt.boldZone`; DATE (orderedEntrySegments()'s `last`
+  // slot here) never does (this popup has no time segment for `boldTime`
+  // to ever apply to, and the design brief is explicit that the date
+  // itself is never bold) -- the `kind` tag orderedEntrySegments() puts on
+  // each slot is what lets this method map straight to the right bold
+  // flag without re-deriving "which slot is which" itself. Every segment
+  // label AND the spacer labels between them share the SAME `font-size`/
+  // `color` CSS from `cell.fmt` -- the whole CELL's effective per-zone
+  // size/colour, exactly like the panel's own per-entry size/colour wraps
+  // a whole markup entry in a single outer <span> (buildEntryMarkup()).
+  // See hoverPopup.js's own module-header comment for why CSS
+  // (`set_style()`/the `style` property) is used here, never Pango markup.
+  _buildHoverZoneCell(cell) {
+    let box = new St.BoxLayout({ vertical: false });
+
+    let boldForKind = { city: cell.fmt.boldCity, zone: cell.fmt.boldZone, last: false };
+    let parts = orderedEntrySegments({ city: cell.citySeg, zone: cell.zoneSeg, last: cell.dateText })
+      // Drop an empty CITY slot entirely -- see this method's own comment
+      // above for why that is a rendering-only decision layered on top of
+      // the shared presence/order rule, not a re-divergence of it. The
+      // ZONE slot is only ever present at all when orderedEntrySegments()
+      // itself included it (zoneSeg non-null), and the DATE/`last` slot is
+      // never dropped, matching the pre-existing "always show a date"
+      // behavior.
+      .filter((segment) => segment.kind !== 'city' || segment.text !== '')
+      .map((segment) => ({ text: segment.text, bold: boldForKind[segment.kind] }));
+
+    let spacerStyle = this._hoverSegmentStyle(cell.fmt, false);
+    let fullTextParts = [];
+
+    parts.forEach((part, index) => {
+      if (index > 0) {
+        let spacer = new St.Label({ text: ' ', style: spacerStyle });
+        box.add_child(spacer);
+      }
+
+      let segmentStyle = this._hoverSegmentStyle(cell.fmt, part.bold);
+      let label = new St.Label({
+        text: part.text,
+        x_align: Clutter.ActorAlign.FILL,
+        style: segmentStyle ? `text-align: center; ${segmentStyle}` : 'text-align: center;'
+      });
+      label.accessible_name = part.text;
+      box.add_child(label);
+      fullTextParts.push(part.text);
+    });
+
+    box.accessible_name = fullTextParts.join(' ');
+    return box;
   }
 
   // BUG FIX (live-testing report): toggling a switch OFF flipped the
@@ -1804,11 +1917,13 @@ export default class TimezonesExtension extends Extension {
 
   // Computes the three raw (unescaped, unformatted) segments -- city/
   // alias label, zone abbreviation (or null when hidden), and time --
-  // shared by both the plain-text and markup renderers below. This is
-  // the exact same decision logic the pre-Phase-2 single function used;
-  // it has just been split from the "how to render the segments" step so
-  // that step can be swapped independently (buildEntryText/buildEntryMarkup
-  // in formatting.js).
+  // shared by all three entry renderers: the plain-text join
+  // (buildEntryText) and Pango markup (buildEntryMarkup) in formatting.js,
+  // and the hover popup's per-segment cell builder (_buildHoverZoneCell),
+  // which reuses the city/zone segments (dropping the time in favour of a
+  // date). This is the exact same decision logic the pre-Phase-2 single
+  // function used; it has just been split from the "how to render the
+  // segments" step so that step can be swapped independently.
   //
   // `nameOverride`, when given, is a matched search-result alias display
   // name (Feature A) and takes priority over any stored per-zone label

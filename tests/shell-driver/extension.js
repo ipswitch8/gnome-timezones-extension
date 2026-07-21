@@ -1587,7 +1587,23 @@ export default class ShellTestDriver extends Extension {
       return label ? `${label} ${dateText}` : dateText;
     };
 
-    record('hover popup: with the toggle ON, the real show path builds one LABEL+DATE cell per active zone plus an interleaved separator label, in EXACT _activeOrder order, with each label matching the panel\'s own city/zone segments (independently recomputed) and NO time text anywhere in the popup', () => {
+    // A hover-popup 'zone' cell is now an St.BoxLayout of SEPARATE segment
+    // labels (city/zone/date, with plain single-space spacer labels
+    // between whichever segments are actually present) rather than one
+    // combined St.Label -- see extension.js's _buildHoverZoneCell(). This
+    // reconstructs the SAME combined text an earlier, single-label
+    // version of this popup would have shown, by concatenating every
+    // child's own `.text` with NO extra join separator of its own -- the
+    // spacer labels already contribute their own single space, exactly
+    // mirroring formatting.js's city/zone/time join rule (see
+    // joinEntrySegments()/buildEntryText()) -- so every pre-existing
+    // assertion below that compares a whole cell's text against
+    // `expectedHoverCellText()` keeps working completely unchanged. A
+    // separator cell (a plain St.Label, never boxed) is returned via its
+    // own `.text` directly.
+    const cellText = (child) => (typeof child.text === 'string' ? child.text : child.get_children().map((seg) => seg.text).join(''));
+
+    record('hover popup: with the toggle ON, the real show path builds one cell (as an St.BoxLayout of segment labels) per active zone plus an interleaved separator label, in EXACT _activeOrder order, with each cell\'s combined text matching the panel\'s own city/zone segments (independently recomputed) and NO time text anywhere in the popup', () => {
       assertEqual(inst._activeOrder, ['UTC', 'America/New_York'], 'test setup problem: unexpected _activeOrder going into this test');
       inst._settings.set_string('date-format', 'iso');
       inst._loadSettings();
@@ -1595,10 +1611,10 @@ export default class ShellTestDriver extends Extension {
 
       inst._showHoverPopup();
 
-      const labels = inst._hoverPopupBox.get_children();
-      assertEqual(labels.length, 3, `expected exactly 3 labels (cell, separator, cell) for 2 active zones, got ${labels.length}`);
+      const cells = inst._hoverPopupBox.get_children();
+      assertEqual(cells.length, 3, `expected exactly 3 top-level children (cell, separator, cell) for 2 active zones, got ${cells.length}`);
 
-      const [utcText, sepText, nyText] = labels.map((label) => label.text);
+      const [utcText, sepText, nyText] = cells.map(cellText);
 
       // Real date-format machinery reused, not a second implementation --
       // ISO-shape check ("YYYY-MM-DD") on the DATE portion, and
@@ -1628,7 +1644,7 @@ export default class ShellTestDriver extends Extension {
       // must never appear, even though the label (city/zone) now does.
       const utcTimeText = inst._computeEntrySegments({ item: inst._stateByZone.get('UTC'), full: false }).time;
       const nyTimeText = inst._computeEntrySegments({ item: inst._stateByZone.get('America/New_York'), full: false }).time;
-      const allText = labels.map((label) => label.text).join(' ');
+      const allText = cells.map(cellText).join(' ');
       assertFalse(allText.includes(utcTimeText), `expected no TIME text anywhere in the popup, but found UTC's time text: ${JSON.stringify(allText)}`);
       assertFalse(allText.includes(nyTimeText), `expected no TIME text anywhere in the popup, but found America/New_York's time text: ${JSON.stringify(allText)}`);
 
@@ -1668,7 +1684,7 @@ export default class ShellTestDriver extends Extension {
 
         const showAndReadNyCell = () => {
           inst._showHoverPopup();
-          const text = inst._hoverPopupBox.get_children()[2].text; // America/New_York is always _activeOrder[1] -> cell index 2 in this section
+          const text = cellText(inst._hoverPopupBox.get_children()[2]); // America/New_York is always _activeOrder[1] -> cell index 2 in this section
           inst._hideHoverPopup();
           return text;
         };
@@ -1722,30 +1738,174 @@ export default class ShellTestDriver extends Extension {
       }
     );
 
+    // Flattens the top-level hoverPopupBox children into LEAF labels: a
+    // separator cell is already a leaf (a plain St.Label); a 'zone' cell
+    // is an St.BoxLayout, so its own children (segment + spacer labels)
+    // are the leaves instead of the box itself.
+    const leafHoverLabels = (cells) => cells.flatMap((cell) => (typeof cell.text === 'string' ? [cell] : cell.get_children()));
+
     record('hover popup: cell text includes a hostile custom label verbatim (plain St.Label text, never markup) -- the label is the same city segment the panel itself would show, so it is no longer suppressed, but it is never interpreted as markup', () => {
       inst._labels['America/New_York'] = '<b>evil</b> & "quotes"';
       inst._showHoverPopup();
-      const labels = inst._hoverPopupBox.get_children();
-      const nyLabel = labels.find((label) => label.text.includes('evil'));
-      assertTrue(!!nyLabel, 'expected the hostile custom label to appear verbatim in the popup\'s America/New_York cell');
+      const cells = inst._hoverPopupBox.get_children();
+      const nyCell = cells.find((cell) => cellText(cell).includes('evil'));
+      assertTrue(!!nyCell, 'expected the hostile custom label to appear verbatim in the popup\'s America/New_York cell');
       assertTrue(
-        nyLabel.text.startsWith('<b>evil</b> & "quotes" '),
-        `expected the hostile label to prefix the date verbatim, unescaped, with a single space before the date: ${JSON.stringify(nyLabel.text)}`
+        cellText(nyCell).startsWith('<b>evil</b> & "quotes" '),
+        `expected the hostile label to prefix the date verbatim, unescaped, with a single space before the date: ${JSON.stringify(cellText(nyCell))}`
       );
-      labels.forEach((label, index) => {
+      // Every LEAF label -- including the segment/spacer labels inside the
+      // hostile zone cell's own box, not just the top-level cells -- must
+      // never have use-markup enabled.
+      leafHoverLabels(cells).forEach((label, index) => {
         assertTrue(label.clutter_text.get_use_markup() === false, `hover popup label ${index} must never have use-markup enabled`);
       });
       inst._hideHoverPopup();
       delete inst._labels['America/New_York'];
     });
 
-    record('hover popup: reordering _activeOrder (via the real _reorderActiveZone) is reflected in the next show, labels included -- restores the original order afterward for the DnD section below', () => {
+    await recordAsync(
+      'hover popup: per-zone CSS formatting -- a per-zone override (distinct size, colour, boldCity=true/boldZone=FALSE) styles that zone\'s segment labels via CSS, DATE is never bold, a NEUTRAL zone\'s cell carries no size/colour/bold style, and each segment is genuinely a SEPARATE St.Label (not one combined label)',
+      async () => {
+        const cityEntry = inst._configSwitches.showCity;
+        const zoneEntry = inst._configSwitches.showTimezone;
+        assertTrue(cityEntry.getValue() === true && zoneEntry.getValue() === false, 'test setup problem: expected the schema defaults (showCity=true, showTimezone=false) entering this test');
+        assertEqual(inst._activeOrder, ['UTC', 'America/New_York'], 'test setup problem: unexpected _activeOrder entering this test');
+
+        // Turn "Show timezone" on too, so BOTH the city AND zone segments
+        // render for both active zones -- required so boldCity/boldZone
+        // can be proven INDEPENDENT of each other (a cell with only one
+        // segment present could never discriminate a swapped mapping).
+        zoneEntry.item.toggle();
+        assertTrue(zoneEntry.getValue() === true, 'test setup problem: failed to turn on "Show timezone"');
+
+        // Explicit per-zone overrides written directly to the real
+        // 'formatting' gsetting -- exactly the shape prefs.js itself
+        // writes (see the "panel: a per-zone formatting override" test
+        // above for the same real write path). UTC gets a full, explicit
+        // NEUTRAL blob -- proving a per-zone override that happens to be
+        // all-default reads back as genuinely neutral, independent of
+        // whatever 'formatting-defaults' currently holds (the earlier
+        // formatting-defaults tests in this file leave boldCity/boldTime/
+        // boldZone all true there, and a per-zone override must still
+        // win over that). America/New_York gets a deliberately
+        // DISCRIMINATING override: boldCity=true, boldZone=FALSE -- the
+        // core requirement of this test is that a swapped city<->zone
+        // bold mapping in production code would fail HERE (a symmetric
+        // boldCity===boldZone case could never catch that swap).
+        const neutralBlob = JSON.stringify({ size: 0, color: '', boldCity: false, boldTime: false, boldZone: false });
+        const nyBlob = JSON.stringify({ size: 22, color: '#336699', boldCity: true, boldTime: true, boldZone: false });
+        inst._settings.set_value('formatting', new GLib.Variant('a{ss}', { UTC: neutralBlob, 'America/New_York': nyBlob }));
+        inst._loadSettings();
+
+        inst._showHoverPopup();
+        await sleep(200);
+        try {
+          const cells = inst._hoverPopupBox.get_children();
+          assertEqual(cells.length, 3, `expected exactly 3 top-level children (zone cell, separator, zone cell), got ${cells.length}`);
+          const [utcCell, sepCell, nyCell] = cells;
+
+          // Structural proof: each 'zone' cell is genuinely an
+          // St.BoxLayout of SEPARATE segment labels, not one combined
+          // St.Label -- the separator cell remains a single plain label.
+          assertTrue(utcCell instanceof St.BoxLayout, 'expected the UTC cell to be an St.BoxLayout of segment labels, not a single label');
+          assertTrue(nyCell instanceof St.BoxLayout, 'expected the America/New_York cell to be an St.BoxLayout of segment labels, not a single label');
+          assertFalse(sepCell instanceof St.BoxLayout, 'expected the separator cell to remain a plain, unboxed St.Label');
+
+          const nyChildren = nyCell.get_children();
+          assertEqual(nyChildren.length, 5, `expected 5 children (city, spacer, zone, spacer, date) for America/New_York with both toggles on, got ${nyChildren.length}`);
+          const [nyCityLabel, , nyZoneLabel, , nyDateLabel] = nyChildren;
+
+          assertEqual(nyCityLabel.text, 'New York', `expected the FIRST segment label to be the city text: ${JSON.stringify(nyCityLabel.text)}`);
+          const expectedNyZoneAbbrev = GLib.DateTime.new_now(GLib.TimeZone.new('America/New_York')).format('%Z');
+          assertEqual(nyZoneLabel.text, expectedNyZoneAbbrev, `expected the THIRD segment label to be the zone-abbreviation text: ${JSON.stringify(nyZoneLabel.text)}`);
+
+          // size/colour: read each segment label's OWN resolved
+          // theme-node attributes -- the REAL St/Clutter/Pango state, not
+          // a value produced by the code under test -- against
+          // independently-derived expected values (#336699 is a literal;
+          // the font size expectation below is derived from the CSS 'pt'
+          // we wrote via St's own documented, DPI-independent 96/72
+          // pt->px ratio and Pango.SCALE's real integer-rounding step --
+          // NOT by calling sanitizeFontSize()/_hoverSegmentStyle()/any
+          // code under test). Measured directly against a real St theme
+          // node: St resolves CSS 'pt' to an ABSOLUTE device-unit Pango
+          // font size (get_font().get_size() is therefore already in
+          // pixel-equivalent units, not literal points) -- 22pt resolves
+          // to round(22 * 96/72 * 1024)/1024 = 29.3330078125, confirmed
+          // against the real theme node before hardcoding this formula.
+          const expectedPxForPt = (pt) => Math.round(pt * (96 / 72) * Pango.SCALE) / Pango.SCALE;
+          const expectedNySizePx = expectedPxForPt(22);
+          const fontSizePt = (actor) => actor.get_theme_node().get_font().get_size() / Pango.SCALE;
+          assertEqual(fontSizePt(nyCityLabel), expectedNySizePx, `expected the city label's resolved font size to be ${expectedNySizePx} (22pt), got ${fontSizePt(nyCityLabel)}`);
+          assertEqual(fontSizePt(nyZoneLabel), expectedNySizePx, `expected the zone label's resolved font size to be ${expectedNySizePx} (22pt), got ${fontSizePt(nyZoneLabel)}`);
+          assertEqual(fontSizePt(nyDateLabel), expectedNySizePx, `expected the date label's resolved font size to be ${expectedNySizePx} (22pt), got ${fontSizePt(nyDateLabel)}`);
+
+          assertEqual(hexOfThemeNode(nyCityLabel), '#336699', `expected the city label's resolved colour to be #336699, got ${hexOfThemeNode(nyCityLabel)}`);
+          assertEqual(hexOfThemeNode(nyZoneLabel), '#336699', `expected the zone label's resolved colour to be #336699, got ${hexOfThemeNode(nyZoneLabel)}`);
+          assertEqual(hexOfThemeNode(nyDateLabel), '#336699', `expected the date label's resolved colour to be #336699, got ${hexOfThemeNode(nyDateLabel)}`);
+
+          // bold: the CORE discriminating assertion of this test -- CITY
+          // bold, ZONE NOT bold (boldCity=true !== boldZone=false above,
+          // so a swapped city<->zone bold mapping in production code
+          // fails EXACTLY this pair of assertions).
+          const weightOf = (actor) => actor.get_theme_node().get_font().get_weight();
+          assertEqual(weightOf(nyCityLabel), Pango.Weight.BOLD, `expected the CITY label to be bold (font-weight: bold), got weight ${weightOf(nyCityLabel)} (Pango.Weight.BOLD=${Pango.Weight.BOLD})`);
+          assertTrue(weightOf(nyZoneLabel) !== Pango.Weight.BOLD, `expected the ZONE label to NOT be bold, got weight ${weightOf(nyZoneLabel)}`);
+          // DATE must NEVER be bold, even though boldCity is on for this
+          // very same cell/zone.
+          assertTrue(weightOf(nyDateLabel) !== Pango.Weight.BOLD, `expected the DATE label to NEVER be bold even though boldCity is on for this zone, got weight ${weightOf(nyDateLabel)}`);
+
+          // NEUTRAL zone (UTC, explicit all-default override): no
+          // size/colour/bold style anywhere in its cell -- every segment
+          // simply inherits the popup's ambient theme default, exactly
+          // like an unconfigured panel entry's markup omits its <span>
+          // attributes entirely. The separator label (never styled by any
+          // zone's formatting) is used as an independent "ambient theme
+          // default colour" oracle to compare against, rather than a
+          // hardcoded literal that could itself drift from the real theme.
+          const utcChildren = utcCell.get_children();
+          assertEqual(utcChildren.length, 5, `expected 5 children for UTC with both toggles on too, got ${utcChildren.length}`);
+          const ambientColor = hexOfThemeNode(sepCell);
+          utcChildren.forEach((child, index) => {
+            assertEqual(hexOfThemeNode(child), ambientColor, `UTC segment ${index}: expected the ambient theme default colour (no override), got ${hexOfThemeNode(child)} vs ambient ${ambientColor}`);
+            assertTrue(weightOf(child) !== Pango.Weight.BOLD, `UTC segment ${index}: expected no bold styling for a neutral zone, got weight ${weightOf(child)}`);
+          });
+
+          // Plain text, never markup, anywhere in this popup -- including
+          // every newly-styled segment label.
+          [...utcChildren, ...nyChildren, sepCell].forEach((label, index) => {
+            assertTrue(label.clutter_text.get_use_markup() === false, `label ${index} must never have use-markup enabled`);
+          });
+
+          // Finite, non-collapsed allocation for every segment/spacer
+          // actor -- not just the top-level cell boxes (the exact class
+          // of bug that has already shipped twice in this project's
+          // history).
+          [...utcChildren, ...nyChildren].forEach((label, index) => {
+            const box = label.get_allocation_box();
+            [box.x1, box.x2, box.y1, box.y2].forEach((coord) => assertTrue(Number.isFinite(coord), `segment label ${index}: allocation coordinate is not finite`));
+            assertTrue(box.x2 - box.x1 > 0, `segment label ${index}: allocation width is not positive`);
+            assertTrue(box.y2 - box.y1 > 0, `segment label ${index}: allocation height is not positive`);
+          });
+        } finally {
+          inst._hideHoverPopup();
+          await sleep(100);
+          inst._settings.set_value('formatting', new GLib.Variant('a{ss}', {}));
+          inst._loadSettings();
+          zoneEntry.item.toggle();
+          assertTrue(zoneEntry.getValue() === false, 'failed to restore "Show timezone" to false');
+        }
+      }
+    );
+
+    record('hover popup: reordering _activeOrder (via the real _reorderActiveZone) is reflected in the next show, cells included -- restores the original order afterward for the DnD section below', () => {
       inst._reorderActiveZone('America/New_York', 0);
       assertEqual(inst._activeOrder, ['America/New_York', 'UTC'], 'test setup problem: reorder did not produce the expected order');
 
       inst._showHoverPopup();
-      const labels = inst._hoverPopupBox.get_children();
-      assertEqual(labels.length, 3, `expected exactly 3 labels after reorder, got ${labels.length}`);
+      const cells = inst._hoverPopupBox.get_children();
+      assertEqual(cells.length, 3, `expected exactly 3 top-level children after reorder, got ${cells.length}`);
 
       const glibTzNy = GLib.TimeZone.new('America/New_York');
       const glibTzUtc = GLib.TimeZone.new('UTC');
@@ -1753,8 +1913,8 @@ export default class ShellTestDriver extends Extension {
       const expectedNyDate = targetModules.formatDateForDisplay(GLib.DateTime.new_now(glibTzNy), expectedFormat);
       const expectedUtcDate = targetModules.formatDateForDisplay(GLib.DateTime.new_now(glibTzUtc), expectedFormat);
 
-      assertEqual(labels[0].text, expectedHoverCellText('America/New_York', expectedNyDate), `expected label 0 to be America/New_York's label+date after reorder: ${JSON.stringify(labels[0].text)}`);
-      assertEqual(labels[2].text, expectedHoverCellText('UTC', expectedUtcDate), `expected label 2 to be UTC's label+date after reorder: ${JSON.stringify(labels[2].text)}`);
+      assertEqual(cellText(cells[0]), expectedHoverCellText('America/New_York', expectedNyDate), `expected cell 0 to be America/New_York's label+date after reorder: ${JSON.stringify(cellText(cells[0]))}`);
+      assertEqual(cellText(cells[2]), expectedHoverCellText('UTC', expectedUtcDate), `expected cell 2 to be UTC's label+date after reorder: ${JSON.stringify(cellText(cells[2]))}`);
       inst._hideHoverPopup();
 
       // Restore the exact starting order the DnD section below hard-codes.
@@ -1762,7 +1922,7 @@ export default class ShellTestDriver extends Extension {
       assertEqual(inst._activeOrder, ['UTC', 'America/New_York'], 'failed to restore the original _activeOrder for the DnD section below');
     });
 
-    await recordAsync('hover popup: rendering -- the popup and every one of its date/separator labels are genuinely mapped with finite, non-collapsed allocation (not just present in the object graph), laid out left-to-right with no overlap', async () => {
+    await recordAsync('hover popup: rendering -- the popup and every one of its cell/segment/separator labels are genuinely mapped with finite, non-collapsed allocation (not just present in the object graph), laid out left-to-right with no overlap', async () => {
       inst._showHoverPopup();
       await sleep(300);
       try {
@@ -1775,19 +1935,28 @@ export default class ShellTestDriver extends Extension {
         assertTrue(Number.isFinite(popupWidth) && popupWidth > 0, `popup allocation width is not finite/positive: ${popupWidth}`);
 
         const labels = inst._hoverPopupBox.get_children();
-        assertEqual(labels.length, 3, `expected exactly 3 labels, got ${labels.length}`);
+        assertEqual(labels.length, 3, `expected exactly 3 top-level children, got ${labels.length}`);
 
-        labels.forEach((label, index) => {
-          assertTrue(label.mapped === true, `label ${index} is not mapped`);
+        // Every LEAF label -- both top-level separator labels AND every
+        // segment/spacer label nested inside a 'zone' cell's own box --
+        // must be genuinely mapped with a finite, non-collapsed
+        // allocation. This is the deeper actor tree the segmented
+        // per-zone-formatting design introduces (see _buildHoverZoneCell()
+        // in extension.js): a NaN/zero box anywhere in it is the exact
+        // class of bug that has already shipped twice in this project's
+        // history.
+        const leaves = leafHoverLabels(labels);
+        leaves.forEach((label, index) => {
+          assertTrue(label.mapped === true, `leaf label ${index} is not mapped`);
           const box = label.get_allocation_box();
           [box.x1, box.x2, box.y1, box.y2].forEach((coord, coordIndex) => {
-            assertTrue(Number.isFinite(coord), `label ${index}: allocation coordinate #${coordIndex} is not finite`);
+            assertTrue(Number.isFinite(coord), `leaf label ${index}: allocation coordinate #${coordIndex} is not finite`);
           });
-          assertTrue(box.x2 - box.x1 > 0, `label ${index}: allocation width is not positive`);
-          assertTrue(box.y2 - box.y1 > 0, `label ${index}: allocation height is not positive`);
+          assertTrue(box.x2 - box.x1 > 0, `leaf label ${index}: allocation width is not positive`);
+          assertTrue(box.y2 - box.y1 > 0, `leaf label ${index}: allocation height is not positive`);
         });
 
-        // Cross-label sanity: successive labels must not overlap
+        // Cross-label sanity: successive TOP-LEVEL labels must not overlap
         // horizontally (a real left-to-right single row, not everything
         // collapsed onto the same x).
         for (let i = 1; i < labels.length; i++) {

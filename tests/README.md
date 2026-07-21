@@ -11,8 +11,9 @@ Exercises `formatting.js`, `separators.js`, `dateFormats.js`, and
 RGBA->hex conversion (`rgbaToHex`), the per-zone/global-default
 precedence rule (`getEffectiveFormatting`), date-format resolution and
 null-safe formatting (`resolveDateFormat`/`formatDateForDisplay`), and
-the hover popup's single-line "label + date" cell model
-(`hoverPopup.js`'s `buildHoverPopupCells()`). No GTK/Adw involved.
+the hover popup's single-line, per-zone-FORMATTED cell model
+(`hoverPopup.js`'s `buildHoverPopupCells()` -- see the "Hover popup"
+section further down for the full shape). No GTK/Adw involved.
 
 (`formattingPresets.js` was deleted along with the popup menu's Font
 size/Color preset submenus -- prefs.js uses a real spin control and
@@ -399,27 +400,39 @@ for how it works.
   hostile payloads (proving Pango treats them as inert text, not just
   that the assembled string looks escaped) and a full write-path ->
   GSettings -> read-path pipeline test.
-- `hoverPopup.js`'s pure single-line, "label + date" cell-model logic
-  (`run-tests.js`): exact `_activeOrder` ordering for date cells (not
+- `hoverPopup.js`'s pure single-line, per-zone-FORMATTED cell-model logic
+  (`run-tests.js`): exact `_activeOrder` ordering for 'zone' cells (not
   membership-only, not alphabetical), a separator cell interleaved
-  between every pair of date cells and never before the first/after the
+  between every pair of zone cells and never before the first/after the
   last, reflecting a reorder, `dateText` via the real
   `resolveDateFormat()`/`formatDateForDisplay()`, skipping stale/unknown
   zone ids (with no stray separator cell left behind), the empty/
   single-zone edge cases, the `separatorValue` default, and that
   `dateText` survives completely verbatim from `formatDateForDisplay()`
   (this module never escapes anything -- see its own module comment for
-  why that is correct, not a gap). Also: the optional `getLabelText`
-  callback's per-zone return value is exposed verbatim as that cell's
-  `labelText` (never altering `dateText`/order/separators), an omitted
-  callback (or one returning `''` for a given zone) falls back to
-  `labelText === ''` for that zone specifically, and a hostile
-  `getLabelText` result (markup metacharacters) survives completely
-  verbatim -- this module never escapes or interprets it. This module has
-  no dependency on panel entry TIME at all -- that information already
-  lives in the panel itself; the LABEL (city/zone) is supplied entirely
-  by the caller's `getLabelText` callback so the showCity/showTimezone/
-  custom-label decision itself is never duplicated here (see
+  why that is correct, not a gap). Also: the optional `getEntrySegments`
+  callback's per-zone `{city, zone}` result is exposed verbatim as that
+  cell's `citySeg`/`zoneSeg` (never altering `dateText`/order/
+  separators; `zoneSeg` preserves `null` rather than coercing it to `''`),
+  an omitted callback (or one returning `{city: '', zone: null}` for a
+  given zone) falls back to `citySeg === ''`/`zoneSeg === null` for that
+  zone specifically, and a hostile city segment (markup metacharacters)
+  survives completely verbatim -- this module never escapes or interprets
+  it. The optional `getFormatting` callback's per-zone EFFECTIVE
+  formatting object is re-sanitized (via `sanitizeFormatting()`,
+  defense-in-depth, matching `buildEntryMarkup()`'s own discipline) and
+  exposed as that cell's `fmt` (`{size, color, boldCity, boldZone}`) --
+  `boldTime` is dropped entirely (this popup has no time segment for it
+  to ever apply to); an omitted callback falls back to
+  `DEFAULT_FORMATTING`'s neutral values for every zone; an out-of-range
+  size/invalid colour are proven to never reach `fmt` unsanitized. This
+  module has no dependency on panel entry TIME at all -- that information
+  already lives in the panel itself; the CITY/ZONE segments are supplied
+  entirely by the caller's `getEntrySegments` callback so the
+  showCity/showTimezone/custom-label decision itself is never duplicated
+  here, and the size/colour/bold values are supplied entirely by the
+  caller's `getFormatting` callback so the per-zone-override/global-
+  default precedence rule is never duplicated here either (see
   `hoverPopup.js`'s own module comment).
 - `prefs.js`'s real widget tree: construction, the exact `tzprefs-*`
   widget-name set, zero-write-on-open, per-zone override
@@ -749,35 +762,54 @@ Covered:
   is verified at the JS-bookkeeping level plus the source fact that
   `disable()` unconditionally disconnects it before nulling it, rather
   than via `g_signal_handler_is_connected()`.)
-- **Hover popup ("Show dates on hover")**: a single line of LABEL + DATE
-  cells -- each cell is that zone's LABEL (city name/alias and/or zone
-  abbreviation, exactly whichever the "Show city name"/"Show timezone"
-  toggles currently select -- the SAME decision the panel itself makes,
-  via `_computeEntrySegments()`/`buildEntryText()`, just with the TIME
-  segment dropped) followed by a space and its DATE, or the bare date
-  alone when the label is empty (both toggles off, no custom label) --
-  with the panel's own resolved separator interleaved between every pair
-  of zones, in `_activeOrder` order, e.g. (default showCity=true,
-  showTimezone=false):
+- **Hover popup ("Show dates on hover")**: a single line of cells -- each
+  'zone' cell is now an `St.BoxLayout` of up to three SEPARATE segment
+  labels (CITY, ZONE-abbreviation, DATE -- whichever are present, per the
+  "Show city name"/"Show timezone" toggles, the SAME decision the panel
+  itself makes via `_computeEntrySegments()`, just with the TIME segment
+  dropped), joined by plain single-space spacer labels, or the bare date
+  alone when both segments are empty (both toggles off, no custom label)
+  -- with the panel's own resolved separator (a plain, unstyled label)
+  interleaved between every pair of zones, in `_activeOrder` order, e.g.
+  (default showCity=true, showTimezone=false):
   ```
   UTC 20/07/2026 | New York 20/07/2026
   ```
-  The pure cell-selection-and-ordering logic
+  **Per-zone formatting, via CSS, not markup**: each cell's segment labels
+  also carry that zone's EFFECTIVE size/colour (the SAME per-zone-
+  override/global-default precedence the panel itself uses, via
+  `_getEffectiveFormatting()`) applied to the WHOLE cell, and bold applied
+  INDEPENDENTLY per segment -- `boldCity` bolds only the city label,
+  `boldZone` only the zone label, and the DATE is NEVER bold. This is
+  applied via plain St CSS (`set_style()`: `font-size`/`color`/
+  `font-weight: bold`), deliberately NEVER Pango markup -- every hover
+  segment label starts at byte offset 0 in its OWN `St.Label`, so a markup
+  `<span foreground="...">` colour would lose to St's own whole-text base
+  FOREGROUND attribute in EVERY cell (the same platform quirk that broke
+  the panel's FIRST entry's colour, see `_updateLabel()`'s own comment in
+  `extension.js`) -- CSS `color` sets the label's own base attribute
+  directly, so there is no base-attribute collision to lose in the first
+  place, and (since nothing here is ever parsed as markup) no escaping
+  surface either.
+  The pure cell-selection/ordering/segment/formatting logic
   (`hoverPopup.js`'s `buildHoverPopupCells()`) is covered independently
-  by `run-tests.js` (see below); this shell driver covers everything that
-  logic alone cannot -- the real actor/signal/timer plumbing AND the real
-  layout allocation in `extension.js`:
-  - **Content and exact order, label + date**: with the toggle ON,
-    `_showHoverPopup()` builds one plain-text "label + date" cell per zone
-    in `_activeOrder`, in that EXACT order (asserted by index, not just
-    membership), plus one separator label between every adjacent pair --
-    never before the first or after the last. Each cell's text is
-    cross-checked against an INDEPENDENTLY recomputed expected label (a
-    small helper in the test itself, re-deriving the city/zone segments
-    from `inst._config`/`inst._labels` directly rather than calling
-    `_computeEntrySegments()`/`_getHoverPopupLabelText()` -- the very
+  by `run-tests.js` (see above); this shell driver covers everything that
+  logic alone cannot -- the real actor/signal/timer plumbing, the real CSS
+  application, and the real layout allocation in `extension.js`:
+  - **Content and exact order, segments + date**: with the toggle ON,
+    `_showHoverPopup()` builds one cell (a real `St.BoxLayout` of segment
+    labels) per zone in `_activeOrder`, in that EXACT order (asserted by
+    index, not just membership), plus one separator label between every
+    adjacent pair -- never before the first or after the last. Each
+    cell's COMBINED text (every leaf segment/spacer label's own `.text`
+    concatenated, with no extra join separator -- the spacer labels
+    already contribute their own single space) is cross-checked against
+    an INDEPENDENTLY recomputed expected label (a small helper in the
+    test itself, re-deriving the city/zone segments from
+    `inst._config`/`inst._labels` directly rather than calling
+    `_computeEntrySegments()`/`_getHoverPopupEntrySegments()` -- the very
     functions under test -- so a genuine mismatch between the popup's
-    label and the panel's own decision would be caught, not just an
+    segments and the panel's own decision would be caught, not just an
     echo of whatever production code already computed) joined with the
     real `date-format` gsetting/`resolveDateFormat()`/
     `formatDateForDisplay()` machinery for that zone's "right now". Each
@@ -786,27 +818,68 @@ Covered:
     neither active zone's real rendered TIME text
     (`inst._computeEntrySegments({ item, full: false }).time`) appears
     anywhere in the popup's combined text -- proving times never leak
-    into the popup even though labels now do. A separate test toggles the
-    real "Show city name"/"Show timezone" config switches (both/
+    into the popup even though segments now do. A separate test toggles
+    the real "Show city name"/"Show timezone" config switches (both/
     city-only/zone-only/neither) and re-shows the popup after each
-    toggle, asserting the label portion changes accordingly every time
-    (never cached from an earlier show), then restores the schema
+    toggle, asserting the combined cell text changes accordingly every
+    time (never cached from an earlier show), then restores the schema
     defaults. A real `_reorderActiveZone()` call is proven to change the
-    label+date order on the NEXT show, then the order is restored for the
-    DnD section that follows.
+    cell order on the NEXT show, then the order is restored for the DnD
+    section that follows.
+  - **Per-zone CSS formatting -- size/colour/bold, discriminating the
+    city<->zone bold mapping**: a per-zone override (deliberately
+    `boldCity=true`/`boldZone=FALSE` -- a SYMMETRIC case, e.g. both true
+    or both false, would pass even if a swapped mapping shipped, so this
+    test specifically chooses a zone where the two flags DIFFER) is
+    written directly to the real `formatting` gsetting, alongside a
+    second zone given a full, explicit NEUTRAL override (proving a
+    per-zone override wins over whatever `formatting-defaults` currently
+    holds -- the formatting-defaults tests earlier in this file leave
+    boldCity/boldTime/boldZone all `true` there). After a real show: each
+    'zone' cell is confirmed to be a genuine `St.BoxLayout`
+    (`instanceof St.BoxLayout`) of SEPARATE city/zone/date segment labels
+    -- not one combined label -- while the separator cell remains a
+    plain, unboxed `St.Label`. Each segment label's OWN resolved
+    theme-node font size (`get_theme_node().get_font().get_size()`) and
+    colour (`get_theme_node().get_foreground_color()`) are asserted
+    against independently-derived expected values (a literal hex colour;
+    the font-size expectation is derived from St's own documented CSS
+    `pt`->device-unit conversion and `Pango.SCALE`'s integer rounding,
+    confirmed against a real theme node before being hardcoded -- never
+    by calling `sanitizeFontSize()`/`_hoverSegmentStyle()`, the code under
+    test). Bold is checked via each label's resolved
+    `get_theme_node().get_font().get_weight()` against the real
+    `Pango.Weight.BOLD` constant: the CITY label is bold, the ZONE label
+    is NOT, and the DATE label is NEVER bold even though `boldCity` is on
+    for that same cell/zone. The NEUTRAL zone's cell is confirmed to carry
+    NO size/colour/bold override at all -- every segment's resolved
+    colour matches the popup's own unstyled separator label (an
+    independent "ambient theme default" oracle) and no segment is bold.
+    Every leaf label (including the newly-styled segment labels) is
+    reconfirmed plain-text (`use_markup === false`) and genuinely mapped
+    with a finite, positive allocation. **Proven to actually discriminate**
+    (not just "written," verified): swapping which flag (`boldCity`/
+    `boldZone`) is applied to which segment in `extension.js`, dropping
+    the size/colour CSS application entirely, and applying bold to the
+    DATE segment were each independently reproduced against a real
+    mutated copy of `extension.js` and confirmed to fail this EXACT test
+    (79/80, this test the sole failure in each case) before being
+    reverted.
   - **Plain-text-only, never markup, hostile custom label appears
     verbatim**: a hostile per-zone custom label (`<b>evil</b> & "quotes"`)
     is set on an active zone and the popup is shown -- since that label
     IS the city segment the panel itself would show (when "Show city
     name" is on), it is no longer suppressed: the popup's cell for that
-    zone is asserted to contain it completely verbatim, prefixed to the
-    date with a single space. `clutter_text.get_use_markup()` is confirmed
-    `false` for every label in the popup regardless, proving this popup
-    never touches the markup surface at all (see `hoverPopup.js`'s own
-    module comment for why that is a deliberate design choice, not an
-    oversight) -- the hostile string reaches `label.text` unescaped and
-    uninterpreted, which is safe precisely because it is never parsed as
-    markup.
+    zone is asserted to contain it completely verbatim (via its combined
+    segment text), prefixed to the date with a single space.
+    `clutter_text.get_use_markup()` is confirmed `false` for every LEAF
+    label in the popup regardless -- including every segment/spacer label
+    nested inside a 'zone' cell's own box, not just the top-level cells --
+    proving this popup never touches the markup surface at all (see
+    `hoverPopup.js`'s own module comment for why that is a deliberate
+    design choice, not an oversight) -- the hostile string reaches every
+    segment label's `.text` unescaped and uninterpreted, which is safe
+    precisely because it is never parsed as markup.
   - **Lazy by design -- inert when disabled (karen-gate finding)**: with
     the toggle off (the schema default), this extension must add
     *nothing* to `Main.layoutManager.uiGroup` and connect *nothing* to

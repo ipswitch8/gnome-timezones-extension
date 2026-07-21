@@ -22,6 +22,7 @@ import {
   setZoneFormatting,
   rgbaToHex,
   getEffectiveFormatting,
+  orderedEntrySegments,
 } from '../formatting.js';
 
 import {
@@ -538,6 +539,76 @@ test('buildEntryText: custom label containing spaces', () =>
 
 test('buildEntryText: undefined zone treated same as null (hidden)', () =>
   assertEqual(buildEntryText({ city: 'X', zone: undefined, time: 'Y' }), 'X Y'));
+
+// ---------------------------------------------------------------------
+// orderedEntrySegments -- the SHARED order/presence rule underlying BOTH
+// joinEntrySegments()/buildEntryText() (the panel/menu's plain-text join,
+// tested immediately above) AND extension.js's _buildHoverZoneCell() (the
+// hover popup's per-segment-actor rendering, see hoverPopup.js's own
+// getFormatting/getEntrySegments-driven cell model further below). This
+// is the "which segments, in what order, one space between" decision the
+// two consumers now genuinely share -- NOT a re-implementation each side
+// maintains independently.
+// ---------------------------------------------------------------------
+
+test('orderedEntrySegments: city+zone+last -- three slots, in order, each tagged with its kind', () => {
+  const segments = orderedEntrySegments({ city: 'New York', zone: 'EST', last: '3:00 PM' });
+  assertEqual(segments, [
+    { kind: 'city', text: 'New York' },
+    { kind: 'zone', text: 'EST' },
+    { kind: 'last', text: '3:00 PM' },
+  ]);
+});
+
+test('orderedEntrySegments: zone null (hidden) -- exactly two slots, zone omitted entirely (not an empty-string slot)', () => {
+  const segments = orderedEntrySegments({ city: 'New York', zone: null, last: '3:00 PM' });
+  assertEqual(segments, [
+    { kind: 'city', text: 'New York' },
+    { kind: 'last', text: '3:00 PM' },
+  ]);
+});
+
+test('orderedEntrySegments: zone undefined is treated the same as null (hidden)', () => {
+  const segments = orderedEntrySegments({ city: 'X', zone: undefined, last: 'Y' });
+  assertEqual(segments, [
+    { kind: 'city', text: 'X' },
+    { kind: 'last', text: 'Y' },
+  ]);
+});
+
+test('orderedEntrySegments: an empty city is still its OWN slot (kind: \'city\', text: \'\') -- never omitted from the list, unlike a null zone', () => {
+  const segments = orderedEntrySegments({ city: '', zone: 'PST', last: '3:00 PM' });
+  assertEqual(segments, [
+    { kind: 'city', text: '' },
+    { kind: 'zone', text: 'PST' },
+    { kind: 'last', text: '3:00 PM' },
+  ]);
+});
+
+test('orderedEntrySegments: an omitted `last` normalizes to an empty-string \'last\' slot, still present (never omitted)', () => {
+  const segments = orderedEntrySegments({ city: 'UTC', zone: null });
+  assertEqual(segments, [
+    { kind: 'city', text: 'UTC' },
+    { kind: 'last', text: '' },
+  ]);
+});
+
+test('orderedEntrySegments: joining its `text` values with a single space reproduces buildEntryText()\'s output EXACTLY, for every shape (city+zone+last, zone hidden, empty city either way)', () => {
+  const cases = [
+    { city: 'New York', zone: 'EST', last: '3:00 PM' },
+    { city: 'New York', zone: null, last: '3:00 PM' },
+    { city: '', zone: null, last: '3:00 PM' },
+    { city: '', zone: 'PST', last: '3:00 PM' },
+    { city: 'My Home Base', zone: 'PST', last: '11:45 AM' },
+  ];
+  cases.forEach(({ city, zone, last }) => {
+    const joined = orderedEntrySegments({ city, zone, last })
+      .map((segment) => segment.text)
+      .join(' ');
+    const expected = buildEntryText({ city, zone, time: last });
+    assertEqual(joined, expected, `orderedEntrySegments()+join(' ') disagreed with buildEntryText() for ${JSON.stringify({ city, zone, last })}`);
+  });
+});
 
 // ---------------------------------------------------------------------
 // buildEntryMarkup -- neutral formatting equivalence
@@ -1471,16 +1542,15 @@ test('getEffectiveFormatting: empty-string formattingDefaults (schema default, "
 }
 
 // ---------------------------------------------------------------------
-// hoverPopup.js: pure cell-model logic for the ONE-LINE, DATES-ONLY
-// "Show dates on hover" popup. Uses a fixed `now` per zone (via
-// `nowForZone`) so every assertion below is deterministic and never
-// depends on the wall clock at test-run time -- the same technique the
-// formatDateForDisplay tests above use for a single zone, extended here
-// to per-zone injection since buildHoverPopupCells() computes one
-// GLib.DateTime per zone.
+// hoverPopup.js: pure cell-model logic for the ONE-LINE "Show dates on
+// hover" popup. Uses a fixed `now` per zone (via `nowForZone`) so every
+// assertion below is deterministic and never depends on the wall clock at
+// test-run time -- the same technique the formatDateForDisplay tests
+// above use for a single zone, extended here to per-zone injection since
+// buildHoverPopupCells() computes one GLib.DateTime per zone.
 // ---------------------------------------------------------------------
 
-test('buildHoverPopupCells: one date cell per zone in activeOrder, in EXACT activeOrder order (not alphabetical, not membership-only), with a separator cell interleaved between each pair', () => {
+test('buildHoverPopupCells: one zone cell per zone in activeOrder, in EXACT activeOrder order (not alphabetical, not membership-only), with a separator cell interleaved between each pair', () => {
   const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
   const activeOrder = ['America/New_York', 'UTC', 'Asia/Tokyo'];
   const knownZones = new Set(activeOrder);
@@ -1493,13 +1563,13 @@ test('buildHoverPopupCells: one date cell per zone in activeOrder, in EXACT acti
   });
   assertEqual(
     cells.map((c) => c.type),
-    ['date', 'separator', 'date', 'separator', 'date'],
-    'expected date/separator/date/separator/date for 3 active zones'
+    ['zone', 'separator', 'zone', 'separator', 'zone'],
+    'expected zone/separator/zone/separator/zone for 3 active zones'
   );
   assertEqual(
-    cells.filter((c) => c.type === 'date').map((c) => c.zone),
+    cells.filter((c) => c.type === 'zone').map((c) => c.zone),
     activeOrder,
-    'date-cell order must exactly match activeOrder, not any re-sorted order'
+    'zone-cell order must exactly match activeOrder, not any re-sorted order'
   );
   assertTrue(
     cells.filter((c) => c.type === 'separator').every((c) => c.text === ' | '),
@@ -1544,8 +1614,8 @@ test('buildHoverPopupCells: reflects a reordered activeOrder (simulating _reorde
     nowForZone: () => dt,
     separatorValue: ' | ',
   });
-  assertEqual(before.filter((c) => c.type === 'date').map((c) => c.zone), ['UTC', 'America/New_York', 'Asia/Tokyo']);
-  assertEqual(after.filter((c) => c.type === 'date').map((c) => c.zone), ['Asia/Tokyo', 'UTC', 'America/New_York']);
+  assertEqual(before.filter((c) => c.type === 'zone').map((c) => c.zone), ['UTC', 'America/New_York', 'Asia/Tokyo']);
+  assertEqual(after.filter((c) => c.type === 'zone').map((c) => c.zone), ['Asia/Tokyo', 'UTC', 'America/New_York']);
 });
 
 test('buildHoverPopupCells: an activeOrder entry not present in knownZones (stale/foreign entry) is silently skipped, and never gets a separator cell of its own', () => {
@@ -1557,8 +1627,8 @@ test('buildHoverPopupCells: an activeOrder entry not present in knownZones (stal
     nowForZone: () => dt,
     separatorValue: ' | ',
   });
-  assertEqual(cells.map((c) => c.type), ['date', 'separator', 'date'], 'the stale zone must not produce a date cell, and must not leave a stray extra separator');
-  assertEqual(cells.filter((c) => c.type === 'date').map((c) => c.zone), ['UTC', 'Asia/Tokyo']);
+  assertEqual(cells.map((c) => c.type), ['zone', 'separator', 'zone'], 'the stale zone must not produce a zone cell, and must not leave a stray extra separator');
+  assertEqual(cells.filter((c) => c.type === 'zone').map((c) => c.zone), ['UTC', 'Asia/Tokyo']);
 });
 
 test('buildHoverPopupCells: empty activeOrder produces zero cells (matches the pre-existing empty-popup behavior)', () => {
@@ -1571,7 +1641,7 @@ test('buildHoverPopupCells: empty activeOrder produces zero cells (matches the p
   assertEqual(cells, []);
 });
 
-test('buildHoverPopupCells: a single active zone produces exactly one date cell and zero separator cells', () => {
+test('buildHoverPopupCells: a single active zone produces exactly one zone cell and zero separator cells', () => {
   const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
   const cells = buildHoverPopupCells({
     activeOrder: ['UTC'],
@@ -1580,7 +1650,7 @@ test('buildHoverPopupCells: a single active zone produces exactly one date cell 
     nowForZone: () => dt,
     separatorValue: ' | ',
   });
-  assertEqual(cells.map((c) => c.type), ['date'], 'a single zone must never get a leading/trailing separator cell');
+  assertEqual(cells.map((c) => c.type), ['zone'], 'a single zone must never get a leading/trailing separator cell');
 });
 
 test('buildHoverPopupCells: separatorValue defaults to \'\' when omitted, rather than throwing or inserting undefined', () => {
@@ -1615,36 +1685,41 @@ test('buildHoverPopupCells: dateText comes verbatim from formatDateForDisplay --
 });
 
 // ---------------------------------------------------------------------
-// buildHoverPopupCells: `getLabelText` -- the LABEL (city/zone segments,
-// no time) prepended to each cell's date. This module never decides
-// showCity/showTimezone/custom-label itself (see hoverPopup.js's module
-// header) -- these tests only prove the PURE plumbing: whatever
-// `getLabelText(zone)` returns for a zone ends up verbatim as that cell's
-// `labelText`, unrelated cells/separators are unaffected, and an
-// omitted/falsy callback result falls back to '' (date-only).
+// buildHoverPopupCells: `getEntrySegments` -- the CITY/ZONE segments
+// (no time) exposed SEPARATELY per cell, as `citySeg`/`zoneSeg`. This
+// module never decides showCity/showTimezone/custom-label itself (see
+// hoverPopup.js's module header) -- these tests only prove the PURE
+// plumbing: whatever `getEntrySegments(zone)` returns for a zone ends up
+// verbatim as that cell's `citySeg`/`zoneSeg`, unrelated cells/separators
+// are unaffected, and an omitted/malformed callback result falls back to
+// `citySeg: ''`/`zoneSeg: null` (date-only).
 // ---------------------------------------------------------------------
 
-test('buildHoverPopupCells: getLabelText result is exposed verbatim as each date cell\'s labelText, per-zone, without altering dateText/order/separators', () => {
+test('buildHoverPopupCells: getEntrySegments result is exposed verbatim as each zone cell\'s citySeg/zoneSeg, per-zone, without altering dateText/order/separators', () => {
   const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
   const activeOrder = ['America/New_York', 'UTC'];
   const knownZones = new Set(activeOrder);
-  const labels = { 'America/New_York': 'New York EST', UTC: 'UTC' };
+  const segmentsByZone = {
+    'America/New_York': { city: 'New York', zone: 'EST' },
+    UTC: { city: 'UTC', zone: null },
+  };
   const cells = buildHoverPopupCells({
     activeOrder,
     knownZones,
     dateFormat: 'iso',
     nowForZone: () => dt,
-    getLabelText: (zone) => labels[zone],
+    getEntrySegments: (zone) => segmentsByZone[zone],
     separatorValue: ' | ',
   });
-  const dateCells = cells.filter((c) => c.type === 'date');
-  assertEqual(dateCells.map((c) => c.zone), activeOrder, 'zone order must be unaffected by adding getLabelText');
-  assertEqual(dateCells.map((c) => c.labelText), ['New York EST', 'UTC'], 'each cell\'s labelText must be exactly what getLabelText(zone) returned for THAT zone');
-  assertTrue(dateCells.every((c) => c.dateText === formatDateForDisplay(dt, resolveDateFormat('iso'))), 'dateText must be unaffected by getLabelText');
-  assertEqual(cells.filter((c) => c.type === 'separator').map((c) => c.text), [' | '], 'separator cells must be unaffected by getLabelText');
+  const zoneCells = cells.filter((c) => c.type === 'zone');
+  assertEqual(zoneCells.map((c) => c.zone), activeOrder, 'zone order must be unaffected by adding getEntrySegments');
+  assertEqual(zoneCells.map((c) => c.citySeg), ['New York', 'UTC'], 'each cell\'s citySeg must be exactly what getEntrySegments(zone).city returned for THAT zone');
+  assertEqual(zoneCells.map((c) => c.zoneSeg), ['EST', null], 'each cell\'s zoneSeg must be exactly what getEntrySegments(zone).zone returned for THAT zone (null preserved, not coerced to \'\')');
+  assertTrue(zoneCells.every((c) => c.dateText === formatDateForDisplay(dt, resolveDateFormat('iso'))), 'dateText must be unaffected by getEntrySegments');
+  assertEqual(cells.filter((c) => c.type === 'separator').map((c) => c.text), [' | '], 'separator cells must be unaffected by getEntrySegments');
 });
 
-test('buildHoverPopupCells: omitting getLabelText entirely falls back to labelText === \'\' for every cell (pre-existing date-only behavior preserved)', () => {
+test('buildHoverPopupCells: omitting getEntrySegments entirely falls back to citySeg === \'\'/zoneSeg === null for every cell (pre-existing date-only behavior preserved)', () => {
   const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
   const cells = buildHoverPopupCells({
     activeOrder: ['UTC', 'Asia/Tokyo'],
@@ -1653,26 +1728,29 @@ test('buildHoverPopupCells: omitting getLabelText entirely falls back to labelTe
     nowForZone: () => dt,
     separatorValue: ' | ',
   });
-  const dateCells = cells.filter((c) => c.type === 'date');
-  assertTrue(dateCells.every((c) => c.labelText === ''), 'expected labelText === \'\' for every cell when getLabelText is omitted');
+  const zoneCells = cells.filter((c) => c.type === 'zone');
+  assertTrue(zoneCells.every((c) => c.citySeg === ''), 'expected citySeg === \'\' for every cell when getEntrySegments is omitted');
+  assertTrue(zoneCells.every((c) => c.zoneSeg === null), 'expected zoneSeg === null for every cell when getEntrySegments is omitted');
 });
 
-test('buildHoverPopupCells: a getLabelText callback returning \'\' (both showCity/showTimezone off, no custom label) for a zone yields labelText === \'\' for that zone specifically, not for others', () => {
+test('buildHoverPopupCells: a getEntrySegments callback returning {city: \'\', zone: null} (both showCity/showTimezone off, no custom label) for a zone yields citySeg \'\'/zoneSeg null for that zone specifically, not for others', () => {
   const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
   const cells = buildHoverPopupCells({
     activeOrder: ['UTC', 'Asia/Tokyo'],
     knownZones: new Set(['UTC', 'Asia/Tokyo']),
     dateFormat: 'iso',
     nowForZone: () => dt,
-    getLabelText: (zone) => (zone === 'UTC' ? '' : 'Tokyo JST'),
+    getEntrySegments: (zone) => (zone === 'UTC' ? { city: '', zone: null } : { city: 'Tokyo', zone: 'JST' }),
     separatorValue: ' | ',
   });
-  const dateCells = cells.filter((c) => c.type === 'date');
-  assertEqual(dateCells.find((c) => c.zone === 'UTC').labelText, '', 'expected UTC\'s labelText to be \'\' (its own callback result)');
-  assertEqual(dateCells.find((c) => c.zone === 'Asia/Tokyo').labelText, 'Tokyo JST', 'expected Asia/Tokyo\'s labelText to be exactly what its own callback returned');
+  const zoneCells = cells.filter((c) => c.type === 'zone');
+  assertEqual(zoneCells.find((c) => c.zone === 'UTC').citySeg, '', 'expected UTC\'s citySeg to be \'\' (its own callback result)');
+  assertEqual(zoneCells.find((c) => c.zone === 'UTC').zoneSeg, null, 'expected UTC\'s zoneSeg to be null (its own callback result)');
+  assertEqual(zoneCells.find((c) => c.zone === 'Asia/Tokyo').citySeg, 'Tokyo', 'expected Asia/Tokyo\'s citySeg to be exactly what its own callback returned');
+  assertEqual(zoneCells.find((c) => c.zone === 'Asia/Tokyo').zoneSeg, 'JST', 'expected Asia/Tokyo\'s zoneSeg to be exactly what its own callback returned');
 });
 
-test('buildHoverPopupCells: a hostile getLabelText result (markup metacharacters) survives verbatim as labelText -- no escaping/stripping applied here', () => {
+test('buildHoverPopupCells: a hostile getEntrySegments city result (markup metacharacters) survives verbatim as citySeg -- no escaping/stripping applied here', () => {
   const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
   const hostile = '<b>evil</b> & "quotes" & \'apos\'';
   const cells = buildHoverPopupCells({
@@ -1680,10 +1758,70 @@ test('buildHoverPopupCells: a hostile getLabelText result (markup metacharacters
     knownZones: new Set(['UTC']),
     dateFormat: 'iso',
     nowForZone: () => dt,
-    getLabelText: () => hostile,
+    getEntrySegments: () => ({ city: hostile, zone: null }),
     separatorValue: ' | ',
   });
-  assertEqual(cells[0].labelText, hostile, 'expected the hostile label to survive completely verbatim as labelText, with no transformation at all');
+  assertEqual(cells[0].citySeg, hostile, 'expected the hostile city segment to survive completely verbatim as citySeg, with no transformation at all');
+});
+
+// ---------------------------------------------------------------------
+// buildHoverPopupCells: `getFormatting` -- the SANITIZED per-zone `fmt`
+// (`{size, color, boldCity, boldZone}`) each 'zone' cell carries, mirroring
+// the panel's own getEffectiveFormatting() precedence (per-zone override
+// wins over the global default). `boldTime` is deliberately dropped from
+// `fmt` -- this popup has no time segment for it to ever apply to.
+// ---------------------------------------------------------------------
+
+test('buildHoverPopupCells: getFormatting result is sanitized and exposed as each zone cell\'s fmt (size/color/boldCity/boldZone), per-zone, with boldTime dropped', () => {
+  const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
+  const activeOrder = ['America/New_York', 'UTC'];
+  const knownZones = new Set(activeOrder);
+  const fmtByZone = {
+    'America/New_York': { size: 20, color: '#123456', boldCity: true, boldZone: false, boldTime: true },
+    UTC: { ...DEFAULT_FORMATTING },
+  };
+  const cells = buildHoverPopupCells({
+    activeOrder,
+    knownZones,
+    dateFormat: 'iso',
+    nowForZone: () => dt,
+    getFormatting: (zone) => fmtByZone[zone],
+    separatorValue: ' | ',
+  });
+  const zoneCells = cells.filter((c) => c.type === 'zone');
+  const ny = zoneCells.find((c) => c.zone === 'America/New_York');
+  const utc = zoneCells.find((c) => c.zone === 'UTC');
+
+  assertEqual(ny.fmt, { size: 20, color: '#123456', boldCity: true, boldZone: false }, `expected America/New_York's fmt to carry its own size/color/boldCity/boldZone with boldTime dropped: ${JSON.stringify(ny.fmt)}`);
+  assertFalse(Object.prototype.hasOwnProperty.call(ny.fmt, 'boldTime'), 'expected boldTime to be dropped from fmt entirely -- this popup has no time segment');
+  assertEqual(utc.fmt, { size: 0, color: '', boldCity: false, boldZone: false }, `expected UTC's fmt to be neutral (no size/color/bold): ${JSON.stringify(utc.fmt)}`);
+});
+
+test('buildHoverPopupCells: getFormatting result is re-sanitized -- an out-of-range size and an invalid color never reach fmt unsanitized', () => {
+  const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
+  const cells = buildHoverPopupCells({
+    activeOrder: ['UTC'],
+    knownZones: new Set(['UTC']),
+    dateFormat: 'iso',
+    nowForZone: () => dt,
+    getFormatting: () => ({ size: 999, color: 'not-a-color', boldCity: true, boldZone: true }),
+    separatorValue: ' | ',
+  });
+  assertEqual(cells[0].fmt.size, 32, 'expected an out-of-range size to be clamped by sanitizeFontSize() before reaching fmt');
+  assertEqual(cells[0].fmt.color, '', 'expected an invalid color to be rejected (\'\') by sanitizeColor() before reaching fmt');
+});
+
+test('buildHoverPopupCells: omitting getFormatting entirely falls back to DEFAULT_FORMATTING\'s neutral values (no size/color/bold) for every cell', () => {
+  const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
+  const cells = buildHoverPopupCells({
+    activeOrder: ['UTC', 'Asia/Tokyo'],
+    knownZones: new Set(['UTC', 'Asia/Tokyo']),
+    dateFormat: 'iso',
+    nowForZone: () => dt,
+    separatorValue: ' | ',
+  });
+  const zoneCells = cells.filter((c) => c.type === 'zone');
+  assertTrue(zoneCells.every((c) => c.fmt.size === 0 && c.fmt.color === '' && c.fmt.boldCity === false && c.fmt.boldZone === false), 'expected neutral fmt for every cell when getFormatting is omitted');
 });
 
 // ---------------------------------------------------------------------
