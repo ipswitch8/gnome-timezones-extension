@@ -1568,54 +1568,170 @@ export default class ShellTestDriver extends Extension {
       );
     });
 
-    record('hover popup: with the toggle ON, the real show path builds one DATE label per active zone plus an interleaved separator label, in EXACT _activeOrder order, with NO time/name/city text anywhere in the popup', () => {
+    // Independent expected-label computation: deliberately does NOT call
+    // inst._getHoverPopupLabelText()/inst._computeEntrySegments() (the
+    // very functions under test) -- it re-derives the city/zone segments
+    // from inst._config/inst._labels directly, the same way extension.js's
+    // OWN _computeEntrySegments() panel-form branch does, so a genuine
+    // mismatch between the popup's label and the panel's own decision
+    // would be caught here rather than the test merely echoing back
+    // whatever the production code already computed.
+    const independentExpectedLabel = (zone) => {
+      const alias = inst._labels ? inst._labels[zone] : undefined;
+      const cityPart = inst._config.showCity ? alias || zone.split('/').pop().replace('_', ' ') : '';
+      const zonePart = inst._config.showTimezone ? GLib.DateTime.new_now(GLib.TimeZone.new(zone)).format('%Z') : '';
+      return [cityPart, zonePart].filter((part) => part !== '').join(' ');
+    };
+    const expectedHoverCellText = (zone, dateText) => {
+      const label = independentExpectedLabel(zone);
+      return label ? `${label} ${dateText}` : dateText;
+    };
+
+    record('hover popup: with the toggle ON, the real show path builds one LABEL+DATE cell per active zone plus an interleaved separator label, in EXACT _activeOrder order, with each label matching the panel\'s own city/zone segments (independently recomputed) and NO time text anywhere in the popup', () => {
       assertEqual(inst._activeOrder, ['UTC', 'America/New_York'], 'test setup problem: unexpected _activeOrder going into this test');
       inst._settings.set_string('date-format', 'iso');
       inst._loadSettings();
+      assertTrue(inst._config.showCity === true && inst._config.showTimezone === false, 'test setup problem: expected the schema defaults (showCity=true, showTimezone=false) entering this test');
 
       inst._showHoverPopup();
 
       const labels = inst._hoverPopupBox.get_children();
-      assertEqual(labels.length, 3, `expected exactly 3 labels (date, separator, date) for 2 active zones, got ${labels.length}`);
+      assertEqual(labels.length, 3, `expected exactly 3 labels (cell, separator, cell) for 2 active zones, got ${labels.length}`);
 
       const [utcText, sepText, nyText] = labels.map((label) => label.text);
 
       // Real date-format machinery reused, not a second implementation --
-      // ISO-shape check ("YYYY-MM-DD"), and independently cross-checked
-      // against the real formatDateForDisplay()/resolveDateFormat() for
-      // "right now" in each zone.
-      assertTrue(/^\d{4}-\d{2}-\d{2}$/.test(utcText), `expected an ISO-shaped date for UTC: ${JSON.stringify(utcText)}`);
-      assertTrue(/^\d{4}-\d{2}-\d{2}$/.test(nyText), `expected an ISO-shaped date for America/New_York: ${JSON.stringify(nyText)}`);
-
+      // ISO-shape check ("YYYY-MM-DD") on the DATE portion, and
+      // independently cross-checked against the real
+      // formatDateForDisplay()/resolveDateFormat() for "right now" in
+      // each zone.
       const glibTzUtc = GLib.TimeZone.new('UTC');
+      const glibTzNy = GLib.TimeZone.new('America/New_York');
       const expectedFormat = targetModules.resolveDateFormat(inst._settings.get_string('date-format'));
       const expectedUtcDate = targetModules.formatDateForDisplay(GLib.DateTime.new_now(glibTzUtc), expectedFormat);
-      assertEqual(utcText, expectedUtcDate, `UTC date label does not match the real formatDateForDisplay() result: ${JSON.stringify(utcText)}`);
+      const expectedNyDate = targetModules.formatDateForDisplay(GLib.DateTime.new_now(glibTzNy), expectedFormat);
+      assertTrue(/\d{4}-\d{2}-\d{2}/.test(expectedUtcDate), 'test setup problem: expected an ISO-shaped date');
+
+      // Full cell text: label (schema default = city only, "UTC"/"New York")
+      // + ' ' + date, matching the panel's own city/zone decision.
+      assertEqual(utcText, expectedHoverCellText('UTC', expectedUtcDate), `UTC cell text does not match label+date: ${JSON.stringify(utcText)}`);
+      assertEqual(nyText, expectedHoverCellText('America/New_York', expectedNyDate), `America/New_York cell text does not match label+date: ${JSON.stringify(nyText)}`);
 
       // Separator label: the same literal the panel itself joins its own
-      // entries with (_resolveSeparatorValue()).
+      // entries with (_resolveSeparatorValue()) -- unaffected by the label
+      // addition.
       const expectedSeparator = inst._resolveSeparatorValue();
       assertEqual(sepText, expectedSeparator, `separator label text does not match the real resolved separator: ${JSON.stringify(sepText)}`);
 
-      // Design-critical assertion: NO time or name/city text anywhere in
-      // the popup -- the panel-style entry text for either active zone
-      // (city name, zone id, or a rendered time) must never appear.
-      const panelUtcText = inst._getLabelForTimezone({ item: inst._stateByZone.get('UTC') });
-      const panelNyText = inst._getLabelForTimezone({ item: inst._stateByZone.get('America/New_York') });
+      // Design-critical assertion: still NO time text anywhere in the
+      // popup -- the panel's own rendered TIME for either active zone
+      // must never appear, even though the label (city/zone) now does.
+      const utcTimeText = inst._computeEntrySegments({ item: inst._stateByZone.get('UTC'), full: false }).time;
+      const nyTimeText = inst._computeEntrySegments({ item: inst._stateByZone.get('America/New_York'), full: false }).time;
       const allText = labels.map((label) => label.text).join(' ');
-      assertFalse(allText.includes(panelUtcText), `expected the popup to contain no panel-style entry text for UTC, but found it: ${JSON.stringify(allText)}`);
-      assertFalse(allText.includes(panelNyText), `expected the popup to contain no panel-style entry text for America/New_York, but found it: ${JSON.stringify(allText)}`);
-      assertFalse(/New York/.test(allText), `expected no city name anywhere in the dates-only popup: ${JSON.stringify(allText)}`);
+      assertFalse(allText.includes(utcTimeText), `expected no TIME text anywhere in the popup, but found UTC's time text: ${JSON.stringify(allText)}`);
+      assertFalse(allText.includes(nyTimeText), `expected no TIME text anywhere in the popup, but found America/New_York's time text: ${JSON.stringify(allText)}`);
 
       inst._hideHoverPopup();
     });
 
-    record('hover popup: labels are plain St.Label TEXT (never markup) -- a hostile custom label on an active zone does not leak into the (dates-only) popup at all, and no label anywhere has use-markup enabled', () => {
+    record(
+      'hover popup: cell labels track "Show city name"/"Show timezone" LIVE -- toggling either switch and re-showing changes the label accordingly (city-only, both -- in the correct city-THEN-zone order, zone-only, neither), never cached from an earlier show',
+      () => {
+        const cityEntry = inst._configSwitches.showCity;
+        const zoneEntry = inst._configSwitches.showTimezone;
+        assertTrue(!!cityEntry && !!zoneEntry, 'test setup problem: "showCity"/"showTimezone" config switches not tracked');
+        assertTrue(cityEntry.getValue() === true && zoneEntry.getValue() === false, 'test setup problem: expected the schema defaults (showCity=true, showTimezone=false) entering this test');
+        assertEqual(inst._activeOrder, ['UTC', 'America/New_York'], 'test setup problem: unexpected _activeOrder going into this test');
+
+        // Deliberately uses America/New_York, not UTC: UTC's city fallback
+        // ("UTC") and its %Z zone abbreviation ("UTC") are the IDENTICAL
+        // string, so a genuine city<->zone segment swap in production code
+        // would read back identically either way and this section would
+        // never catch it (karen-gate finding). America/New_York's city
+        // fallback ("New York") and %Z abbreviation (EST/EDT, DST-dependent)
+        // are different strings, so an order/segment mistake actually
+        // produces a different, wrong string here.
+        const expectedFormat = targetModules.resolveDateFormat(inst._settings.get_string('date-format'));
+        const expectedNyDate = targetModules.formatDateForDisplay(GLib.DateTime.new_now(GLib.TimeZone.new('America/New_York')), expectedFormat);
+        // The %Z abbreviation is derived independently here via a real
+        // GLib.DateTime call for "right now" (the same technique the date
+        // oracle above uses) rather than hardcoded "EST" -- it is
+        // DST/locale/tzdata-dependent (EST vs EDT), so hardcoding it would
+        // make this assertion wrong for roughly half the year.
+        const nyCityPart = 'New York';
+        const nyZonePart = GLib.DateTime.new_now(GLib.TimeZone.new('America/New_York')).format('%Z');
+        assertTrue(
+          nyCityPart !== nyZonePart,
+          `test setup problem: America/New_York's city fallback and %Z abbreviation must be DIFFERENT strings for this test to discriminate segment order, got "${nyCityPart}" and "${nyZonePart}"`
+        );
+
+        const showAndReadNyCell = () => {
+          inst._showHoverPopup();
+          const text = inst._hoverPopupBox.get_children()[2].text; // America/New_York is always _activeOrder[1] -> cell index 2 in this section
+          inst._hideHoverPopup();
+          return text;
+        };
+
+        // Baseline (schema default): city-only -- must be "New York <date>",
+        // and must NOT contain the zone abbreviation anywhere (catches a
+        // city-only state that accidentally rendered the zone segment
+        // instead of the city segment).
+        const cityOnlyText = showAndReadNyCell();
+        assertEqual(cityOnlyText, expectedHoverCellText('America/New_York', expectedNyDate), 'expected city-only label "New York <date>" with showCity=true/showTimezone=false');
+        assertEqual(cityOnlyText, `${nyCityPart} ${expectedNyDate}`, `expected city-only label to be exactly "New York <date>": ${JSON.stringify(cityOnlyText)}`);
+        assertFalse(cityOnlyText.includes(nyZonePart), `expected no zone abbreviation anywhere in the city-only label: ${JSON.stringify(cityOnlyText)}`);
+
+        // Both on -- the CORE discriminating assertion: city segment FIRST,
+        // then zone segment, then date, in that EXACT order. A genuine
+        // city<->zone segment swap in production code produces a visibly
+        // DIFFERENT, wrong string here ("EST New York <date>" instead of
+        // "New York EST <date>"), unlike the UTC case above where both
+        // orders read identically.
+        zoneEntry.item.toggle();
+        assertTrue(zoneEntry.getValue() === true, 'toggling "Show timezone" did not flip its stored value');
+        const bothOnText = showAndReadNyCell();
+        assertEqual(bothOnText, expectedHoverCellText('America/New_York', expectedNyDate), 'expected "New York <zone> <date>" with both showCity and showTimezone on (independent oracle)');
+        assertEqual(
+          bothOnText,
+          `${nyCityPart} ${nyZonePart} ${expectedNyDate}`,
+          `expected the cell text to be exactly "New York <zone> <date>" IN THAT ORDER (city first, then zone, then date): ${JSON.stringify(bothOnText)}`
+        );
+
+        // Zone-only -- must be "<zone> <date>", and must NOT contain the
+        // city name anywhere (catches a zone-only state that accidentally
+        // rendered the city segment instead of the zone segment).
+        cityEntry.item.toggle();
+        assertTrue(cityEntry.getValue() === false, 'toggling "Show city name" did not flip its stored value');
+        const zoneOnlyText = showAndReadNyCell();
+        assertEqual(zoneOnlyText, expectedHoverCellText('America/New_York', expectedNyDate), 'expected zone-only label with showCity off/showTimezone on (independent oracle)');
+        assertEqual(zoneOnlyText, `${nyZonePart} ${expectedNyDate}`, `expected zone-only label to be exactly "<zone> <date>": ${JSON.stringify(zoneOnlyText)}`);
+        assertFalse(zoneOnlyText.includes(nyCityPart), `expected no city name anywhere in the zone-only label: ${JSON.stringify(zoneOnlyText)}`);
+
+        // Neither -- bare date-only cell (no label, no leading space).
+        zoneEntry.item.toggle();
+        assertTrue(zoneEntry.getValue() === false, 'toggling "Show timezone" back off did not flip its stored value');
+        const dateOnlyText = showAndReadNyCell();
+        assertEqual(dateOnlyText, expectedNyDate, 'expected a bare date-only cell (no label, no leading space) with both toggles off');
+        assertEqual(dateOnlyText, expectedHoverCellText('America/New_York', expectedNyDate), 'independent expected-label helper disagrees with the bare-date expectation when both toggles are off');
+
+        // Restore the schema defaults for every section below.
+        cityEntry.item.toggle();
+        assertTrue(cityEntry.getValue() === true, 'failed to restore "Show city name" to true');
+        assertTrue(zoneEntry.getValue() === false, 'test setup problem: "Show timezone" should already be false going into the restore step');
+      }
+    );
+
+    record('hover popup: cell text includes a hostile custom label verbatim (plain St.Label text, never markup) -- the label is the same city segment the panel itself would show, so it is no longer suppressed, but it is never interpreted as markup', () => {
       inst._labels['America/New_York'] = '<b>evil</b> & "quotes"';
       inst._showHoverPopup();
       const labels = inst._hoverPopupBox.get_children();
-      const allText = labels.map((label) => label.text).join(' ');
-      assertFalse(allText.includes('evil'), `expected the dates-only popup to never render a custom per-zone label at all: ${JSON.stringify(allText)}`);
+      const nyLabel = labels.find((label) => label.text.includes('evil'));
+      assertTrue(!!nyLabel, 'expected the hostile custom label to appear verbatim in the popup\'s America/New_York cell');
+      assertTrue(
+        nyLabel.text.startsWith('<b>evil</b> & "quotes" '),
+        `expected the hostile label to prefix the date verbatim, unescaped, with a single space before the date: ${JSON.stringify(nyLabel.text)}`
+      );
       labels.forEach((label, index) => {
         assertTrue(label.clutter_text.get_use_markup() === false, `hover popup label ${index} must never have use-markup enabled`);
       });
@@ -1623,7 +1739,7 @@ export default class ShellTestDriver extends Extension {
       delete inst._labels['America/New_York'];
     });
 
-    record('hover popup: reordering _activeOrder (via the real _reorderActiveZone) is reflected in the next show -- restores the original order afterward for the DnD section below', () => {
+    record('hover popup: reordering _activeOrder (via the real _reorderActiveZone) is reflected in the next show, labels included -- restores the original order afterward for the DnD section below', () => {
       inst._reorderActiveZone('America/New_York', 0);
       assertEqual(inst._activeOrder, ['America/New_York', 'UTC'], 'test setup problem: reorder did not produce the expected order');
 
@@ -1637,8 +1753,8 @@ export default class ShellTestDriver extends Extension {
       const expectedNyDate = targetModules.formatDateForDisplay(GLib.DateTime.new_now(glibTzNy), expectedFormat);
       const expectedUtcDate = targetModules.formatDateForDisplay(GLib.DateTime.new_now(glibTzUtc), expectedFormat);
 
-      assertEqual(labels[0].text, expectedNyDate, `expected label 0 to be America/New_York's date after reorder: ${JSON.stringify(labels[0].text)}`);
-      assertEqual(labels[2].text, expectedUtcDate, `expected label 2 to be UTC's date after reorder: ${JSON.stringify(labels[2].text)}`);
+      assertEqual(labels[0].text, expectedHoverCellText('America/New_York', expectedNyDate), `expected label 0 to be America/New_York's label+date after reorder: ${JSON.stringify(labels[0].text)}`);
+      assertEqual(labels[2].text, expectedHoverCellText('UTC', expectedUtcDate), `expected label 2 to be UTC's label+date after reorder: ${JSON.stringify(labels[2].text)}`);
       inst._hideHoverPopup();
 
       // Restore the exact starting order the DnD section below hard-codes.

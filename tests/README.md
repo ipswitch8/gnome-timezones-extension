@@ -11,7 +11,7 @@ Exercises `formatting.js`, `separators.js`, `dateFormats.js`, and
 RGBA->hex conversion (`rgbaToHex`), the per-zone/global-default
 precedence rule (`getEffectiveFormatting`), date-format resolution and
 null-safe formatting (`resolveDateFormat`/`formatDateForDisplay`), and
-the dates-only hover popup's single-line cell model
+the hover popup's single-line "label + date" cell model
 (`hoverPopup.js`'s `buildHoverPopupCells()`). No GTK/Adw involved.
 
 (`formattingPresets.js` was deleted along with the popup menu's Font
@@ -399,7 +399,7 @@ for how it works.
   hostile payloads (proving Pango treats them as inert text, not just
   that the assembled string looks escaped) and a full write-path ->
   GSettings -> read-path pipeline test.
-- `hoverPopup.js`'s pure single-line, dates-only cell-model logic
+- `hoverPopup.js`'s pure single-line, "label + date" cell-model logic
   (`run-tests.js`): exact `_activeOrder` ordering for date cells (not
   membership-only, not alphabetical), a separator cell interleaved
   between every pair of date cells and never before the first/after the
@@ -409,9 +409,18 @@ for how it works.
   single-zone edge cases, the `separatorValue` default, and that
   `dateText` survives completely verbatim from `formatDateForDisplay()`
   (this module never escapes anything -- see its own module comment for
-  why that is correct, not a gap). This module has no dependency on
-  panel entry text at all (no times, no zone/city names) -- that
-  information already lives in the panel itself.
+  why that is correct, not a gap). Also: the optional `getLabelText`
+  callback's per-zone return value is exposed verbatim as that cell's
+  `labelText` (never altering `dateText`/order/separators), an omitted
+  callback (or one returning `''` for a given zone) falls back to
+  `labelText === ''` for that zone specifically, and a hostile
+  `getLabelText` result (markup metacharacters) survives completely
+  verbatim -- this module never escapes or interprets it. This module has
+  no dependency on panel entry TIME at all -- that information already
+  lives in the panel itself; the LABEL (city/zone) is supplied entirely
+  by the caller's `getLabelText` callback so the showCity/showTimezone/
+  custom-label decision itself is never duplicated here (see
+  `hoverPopup.js`'s own module comment).
 - `prefs.js`'s real widget tree: construction, the exact `tzprefs-*`
   widget-name set, zero-write-on-open, per-zone override
   seeding/isolation/read-modify-write, "Clear override", and unknown/
@@ -740,46 +749,64 @@ Covered:
   is verified at the JS-bookkeeping level plus the source fact that
   `disable()` unconditionally disconnects it before nulling it, rather
   than via `g_signal_handler_is_connected()`.)
-- **Hover popup ("Show dates on hover")**: a single line of DATES ONLY --
-  no time, no zone/city name/text (that information already lives in the
-  panel itself, "the normal display of the times") -- with the panel's
-  own resolved separator interleaved between every pair of zones, in
-  `_activeOrder` order, e.g.:
+- **Hover popup ("Show dates on hover")**: a single line of LABEL + DATE
+  cells -- each cell is that zone's LABEL (city name/alias and/or zone
+  abbreviation, exactly whichever the "Show city name"/"Show timezone"
+  toggles currently select -- the SAME decision the panel itself makes,
+  via `_computeEntrySegments()`/`buildEntryText()`, just with the TIME
+  segment dropped) followed by a space and its DATE, or the bare date
+  alone when the label is empty (both toggles off, no custom label) --
+  with the panel's own resolved separator interleaved between every pair
+  of zones, in `_activeOrder` order, e.g. (default showCity=true,
+  showTimezone=false):
   ```
-  20/07/2026 | 20/07/2026 | 21/07/2026
+  UTC 20/07/2026 | New York 20/07/2026
   ```
   The pure cell-selection-and-ordering logic
   (`hoverPopup.js`'s `buildHoverPopupCells()`) is covered independently
   by `run-tests.js` (see below); this shell driver covers everything that
   logic alone cannot -- the real actor/signal/timer plumbing AND the real
   layout allocation in `extension.js`:
-  - **Content and exact order, dates only**: with the toggle ON,
-    `_showHoverPopup()` builds one plain-text date label per zone in
-    `_activeOrder`, in that EXACT order (asserted by index, not just
+  - **Content and exact order, label + date**: with the toggle ON,
+    `_showHoverPopup()` builds one plain-text "label + date" cell per zone
+    in `_activeOrder`, in that EXACT order (asserted by index, not just
     membership), plus one separator label between every adjacent pair --
-    never before the first or after the last. Each date label is asserted
-    ISO-shaped and cross-checked byte-for-byte against the real
-    `date-format` gsetting/`resolveDateFormat()`/`formatDateForDisplay()`
-    machinery for that zone's "right now". Each separator label is
-    asserted equal to the real, currently-resolved
+    never before the first or after the last. Each cell's text is
+    cross-checked against an INDEPENDENTLY recomputed expected label (a
+    small helper in the test itself, re-deriving the city/zone segments
+    from `inst._config`/`inst._labels` directly rather than calling
+    `_computeEntrySegments()`/`_getHoverPopupLabelText()` -- the very
+    functions under test -- so a genuine mismatch between the popup's
+    label and the panel's own decision would be caught, not just an
+    echo of whatever production code already computed) joined with the
+    real `date-format` gsetting/`resolveDateFormat()`/
+    `formatDateForDisplay()` machinery for that zone's "right now". Each
+    separator label is asserted equal to the real, currently-resolved
     `_resolveSeparatorValue()`. The design-critical negative assertion:
-    neither active zone's real panel-style entry text
-    (`inst._getLabelForTimezone({ item })`) nor any city name appears
-    anywhere in the popup's combined text -- proving times/names never
-    leak into what is now a dates-only surface. A real
-    `_reorderActiveZone()` call is proven to change the label order on
-    the NEXT show, then the order is restored for the DnD section that
-    follows.
-  - **Plain-text-only, never markup, and a hostile custom label does not
-    leak in at all**: a hostile per-zone custom label
-    (`<b>evil</b> & "quotes"`) is set on an active zone and the popup is
-    shown -- since the popup no longer renders any per-zone label/entry
-    text at all (dates only), the hostile string is asserted absent from
-    the popup entirely, and `clutter_text.get_use_markup()` is confirmed
-    `false` for every label in the popup, proving this popup never
-    touches the markup surface at all (see `hoverPopup.js`'s own module
-    comment for why that is a deliberate design choice, not an
-    oversight).
+    neither active zone's real rendered TIME text
+    (`inst._computeEntrySegments({ item, full: false }).time`) appears
+    anywhere in the popup's combined text -- proving times never leak
+    into the popup even though labels now do. A separate test toggles the
+    real "Show city name"/"Show timezone" config switches (both/
+    city-only/zone-only/neither) and re-shows the popup after each
+    toggle, asserting the label portion changes accordingly every time
+    (never cached from an earlier show), then restores the schema
+    defaults. A real `_reorderActiveZone()` call is proven to change the
+    label+date order on the NEXT show, then the order is restored for the
+    DnD section that follows.
+  - **Plain-text-only, never markup, hostile custom label appears
+    verbatim**: a hostile per-zone custom label (`<b>evil</b> & "quotes"`)
+    is set on an active zone and the popup is shown -- since that label
+    IS the city segment the panel itself would show (when "Show city
+    name" is on), it is no longer suppressed: the popup's cell for that
+    zone is asserted to contain it completely verbatim, prefixed to the
+    date with a single space. `clutter_text.get_use_markup()` is confirmed
+    `false` for every label in the popup regardless, proving this popup
+    never touches the markup surface at all (see `hoverPopup.js`'s own
+    module comment for why that is a deliberate design choice, not an
+    oversight) -- the hostile string reaches `label.text` unescaped and
+    uninterpreted, which is safe precisely because it is never parsed as
+    markup.
   - **Lazy by design -- inert when disabled (karen-gate finding)**: with
     the toggle off (the schema default), this extension must add
     *nothing* to `Main.layoutManager.uiGroup` and connect *nothing* to

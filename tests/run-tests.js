@@ -1615,6 +1615,78 @@ test('buildHoverPopupCells: dateText comes verbatim from formatDateForDisplay --
 });
 
 // ---------------------------------------------------------------------
+// buildHoverPopupCells: `getLabelText` -- the LABEL (city/zone segments,
+// no time) prepended to each cell's date. This module never decides
+// showCity/showTimezone/custom-label itself (see hoverPopup.js's module
+// header) -- these tests only prove the PURE plumbing: whatever
+// `getLabelText(zone)` returns for a zone ends up verbatim as that cell's
+// `labelText`, unrelated cells/separators are unaffected, and an
+// omitted/falsy callback result falls back to '' (date-only).
+// ---------------------------------------------------------------------
+
+test('buildHoverPopupCells: getLabelText result is exposed verbatim as each date cell\'s labelText, per-zone, without altering dateText/order/separators', () => {
+  const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
+  const activeOrder = ['America/New_York', 'UTC'];
+  const knownZones = new Set(activeOrder);
+  const labels = { 'America/New_York': 'New York EST', UTC: 'UTC' };
+  const cells = buildHoverPopupCells({
+    activeOrder,
+    knownZones,
+    dateFormat: 'iso',
+    nowForZone: () => dt,
+    getLabelText: (zone) => labels[zone],
+    separatorValue: ' | ',
+  });
+  const dateCells = cells.filter((c) => c.type === 'date');
+  assertEqual(dateCells.map((c) => c.zone), activeOrder, 'zone order must be unaffected by adding getLabelText');
+  assertEqual(dateCells.map((c) => c.labelText), ['New York EST', 'UTC'], 'each cell\'s labelText must be exactly what getLabelText(zone) returned for THAT zone');
+  assertTrue(dateCells.every((c) => c.dateText === formatDateForDisplay(dt, resolveDateFormat('iso'))), 'dateText must be unaffected by getLabelText');
+  assertEqual(cells.filter((c) => c.type === 'separator').map((c) => c.text), [' | '], 'separator cells must be unaffected by getLabelText');
+});
+
+test('buildHoverPopupCells: omitting getLabelText entirely falls back to labelText === \'\' for every cell (pre-existing date-only behavior preserved)', () => {
+  const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
+  const cells = buildHoverPopupCells({
+    activeOrder: ['UTC', 'Asia/Tokyo'],
+    knownZones: new Set(['UTC', 'Asia/Tokyo']),
+    dateFormat: 'iso',
+    nowForZone: () => dt,
+    separatorValue: ' | ',
+  });
+  const dateCells = cells.filter((c) => c.type === 'date');
+  assertTrue(dateCells.every((c) => c.labelText === ''), 'expected labelText === \'\' for every cell when getLabelText is omitted');
+});
+
+test('buildHoverPopupCells: a getLabelText callback returning \'\' (both showCity/showTimezone off, no custom label) for a zone yields labelText === \'\' for that zone specifically, not for others', () => {
+  const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
+  const cells = buildHoverPopupCells({
+    activeOrder: ['UTC', 'Asia/Tokyo'],
+    knownZones: new Set(['UTC', 'Asia/Tokyo']),
+    dateFormat: 'iso',
+    nowForZone: () => dt,
+    getLabelText: (zone) => (zone === 'UTC' ? '' : 'Tokyo JST'),
+    separatorValue: ' | ',
+  });
+  const dateCells = cells.filter((c) => c.type === 'date');
+  assertEqual(dateCells.find((c) => c.zone === 'UTC').labelText, '', 'expected UTC\'s labelText to be \'\' (its own callback result)');
+  assertEqual(dateCells.find((c) => c.zone === 'Asia/Tokyo').labelText, 'Tokyo JST', 'expected Asia/Tokyo\'s labelText to be exactly what its own callback returned');
+});
+
+test('buildHoverPopupCells: a hostile getLabelText result (markup metacharacters) survives verbatim as labelText -- no escaping/stripping applied here', () => {
+  const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
+  const hostile = '<b>evil</b> & "quotes" & \'apos\'';
+  const cells = buildHoverPopupCells({
+    activeOrder: ['UTC'],
+    knownZones: new Set(['UTC']),
+    dateFormat: 'iso',
+    nowForZone: () => dt,
+    getLabelText: () => hostile,
+    separatorValue: ' | ',
+  });
+  assertEqual(cells[0].labelText, hostile, 'expected the hostile label to survive completely verbatim as labelText, with no transformation at all');
+});
+
+// ---------------------------------------------------------------------
 // summary
 // ---------------------------------------------------------------------
 
