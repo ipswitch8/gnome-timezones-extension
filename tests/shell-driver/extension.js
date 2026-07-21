@@ -1322,13 +1322,16 @@ export default class ShellTestDriver extends Extension {
     );
 
     // =====================================================================
-    // 3c. Date feature: "Show date" switch + "date-format" gsetting,
-    // verified against REAL menu rows (this._activeMenu's actual St.Label
-    // children, built by the real _addActiveMenuRow()/_updateActiveMenu()
-    // -- not just inst._getLabelForTimezone() called in isolation) AND the
-    // real panel label, to prove the date appears ONLY where the design
-    // requires (menu rows) and never in the panel, at every point in this
-    // section.
+    // 3c. Live-toggle staleness fix: a config switch's 'toggled' handler
+    // must refresh an already-open menu's REAL row actors immediately,
+    // not just this._label (the panel) -- see _refreshVisibleTimeLabels()'s
+    // own comment in extension.js for the full history (originally
+    // surfaced via a now-removed menu-row date switch, but the fix is
+    // general: format24/showCity/showTimezone all still change a row's
+    // rendered TEXT). Verified below against REAL menu rows (this._activeMenu's
+    // actual St.Label children, built by the real
+    // _addActiveMenuRow()/_updateActiveMenu() -- not just
+    // inst._getLabelForTimezone() called in isolation).
     // =====================================================================
 
     // Real menu-row text reader: mirrors how a genuine row is built in
@@ -1350,57 +1353,16 @@ export default class ShellTestDriver extends Extension {
       return null;
     };
 
-    record('date feature setup: "Show date" is off by default and date-format is unset (schema defaults)', () => {
-      assertTrue(inst._config.showDate === false, 'showDate should default to false');
-      assertEqual(inst._settings.get_string('date-format'), '', 'date-format should default to the empty string');
-    });
-
-    record('date feature: with "Show date" OFF, a real active-clock menu row does NOT contain a date', () => {
-      inst._updateMenu(); // real _updateTimeLabels()+_updateActiveMenu(), exactly what a menu open does
-      const text = findActiveRowLabelText('UTC');
-      assertTrue(!!text, 'could not find the real UTC row to read its text from');
-      // A rendered date (any of the curated formats) always contains at
-      // least one digit; the un-dated row is exactly
-      // "<mark> UTC HH:MM" (plus zone abbreviation if shown), which
-      // contains digits too (the time) -- so this asserts the SPECIFIC
-      // "(<date>)" trailing addendum this feature adds is absent, not
-      // merely "no digits at all".
-      assertFalse(/\(\d/.test(text), `expected no "(<date...>" addendum in the row text with Show date OFF: ${JSON.stringify(text)}`);
-    });
-
-    record('date feature: with "Show date" OFF, the real PANEL label does NOT contain a date either (baseline before enabling)', () => {
-      inst._updateLabel();
-      const panelText = inst._label.clutter_text.get_text();
-      assertFalse(/\(\d/.test(panelText), `expected no date addendum in the panel text: ${JSON.stringify(panelText)}`);
-    });
-
-    // Live-testing bug report: "Show Date only works when 'Show all zones
-    // on hover' is enabled as well." Root-cause diagnosis (see
-    // _refreshVisibleTimeLabels()'s own comment in extension.js for the
-    // full analysis): every config switch's 'toggled' handler only ever
-    // refreshed the PANEL label -- never this._state's cached item.label
-    // or the already-open menu's own row actors, which were only ever
-    // refreshed by _updateMenu() (menu OPEN or _clearClocks()). So a real
-    // user toggling "Show date" while the menu was already open -- the
-    // ONLY way to reach the switch at all -- saw no change until closing
-    // and reopening the menu. The hover popup never showed this
-    // staleness (it rebuilds its rows from scratch on every show), which
-    // is almost certainly why the user perceived a dependency between the
-    // two switches that never actually existed in the code.
-    //
-    // The tests below (through the "turning Show date back OFF" round-
-    // trip test) deliberately open the REAL menu once and keep it open
+    // These tests deliberately open the REAL menu once and keep it open
     // throughout, calling ONLY the real switch's `.toggle()` method and
     // then reading the REAL row actor's text straight away -- no
     // `inst._updateMenu()`/`inst._updateTimeLabels()` helper call
     // anywhere in between, exactly mirroring a real user click on an
-    // already-open menu. The PREVIOUS version of this suite called
-    // `inst._updateMenu()` immediately after every toggle before reading
-    // the row, which is exactly what let this bug ship: it proved the
-    // eventual state was reachable, never that toggling the switch alone
-    // (as a user actually does) produces it.
+    // already-open menu (see _refreshVisibleTimeLabels()'s own comment in
+    // extension.js for why this matters: an earlier version of this fix
+    // was only proven via a helper call that a real click never makes).
     record(
-      'date feature: opens the real menu before the live-toggle tests below (kept open through the round-trip so those tests can prove no close/reopen is ever needed)',
+      'live-toggle staleness: opens the real menu before the live-toggle test below (kept open so it can prove no close/reopen is ever needed)',
       () => {
         assertTrue(
           inst._config.showHoverPopup === false,
@@ -1411,121 +1373,7 @@ export default class ShellTestDriver extends Extension {
     );
 
     record(
-      'date feature (live user click, menu already open, NO explicit refresh call): toggling the real "Show date" switch ON updates the real visible row IMMEDIATELY -- this is the exact reported bug, reproduced and fixed with showHoverPopup OFF the whole time',
-      () => {
-        const entry = inst._configSwitches.showDate;
-        assertTrue(!!entry, 'no "showDate" config switch tracked -- the popup menu switch was not added');
-        assertTrue(entry.getValue() === false, 'showDate is unexpectedly already true before this test');
-        const beforeDateFormat = inst._settings.get_string('date-format');
-        const beforeFormattingDefaults = inst._settings.get_string('formatting-defaults');
-
-        const before = findActiveRowLabelText('UTC');
-        assertTrue(!!before, 'could not find the real UTC row to read its text from before toggling');
-        assertFalse(/\(\d/.test(before), `test setup problem: row already shows a date before toggling: ${JSON.stringify(before)}`);
-
-        entry.item.toggle(); // real PopupSwitchMenuItem method -> real 'toggled' handler; nothing else called between this and the reads below
-
-        assertTrue(entry.getValue() === true, 'toggling "Show date" did not flip its stored value');
-        const configKeys = inst._settings.get_value('config').deep_unpack();
-        assertTrue(configKeys.showDate === true, 'the real "config" gsetting does not have showDate=true after toggling');
-        assertEqual(inst._settings.get_string('date-format'), beforeDateFormat, 'date-format must be untouched by the Show date switch');
-        assertEqual(inst._settings.get_string('formatting-defaults'), beforeFormattingDefaults, 'formatting-defaults must be untouched by the Show date switch');
-
-        // THE assertion this test exists for: the REAL row actor's text
-        // (never inst._state's item.label, never any other internal
-        // model), read immediately after the toggle with the menu already
-        // open and no helper call in between.
-        const text = findActiveRowLabelText('UTC');
-        assertTrue(!!text, 'could not find the real UTC row to read its text from');
-        assertTrue(
-          /\(\d/.test(text),
-          `expected a "(<date...>" addendum in the row text IMMEDIATELY after toggling Show date ON, menu already open, no explicit refresh call: ${JSON.stringify(text)}`
-        );
-
-        // Cross-check against the REAL formatDateForDisplay()/resolveDateFormat()
-        // (dateFormats.js, imported from the real target extension's own
-        // copy, same convention as targetModules for formatting.js) applied
-        // to "right now" for UTC, rather than just checking "some digits in
-        // parens" -- proves the exact configured format is what actually
-        // rendered, not merely that something date-shaped appeared.
-        const glibTz = GLib.TimeZone.new('UTC');
-        const now = GLib.DateTime.new_now(glibTz);
-        const expectedFormat = targetModules.resolveDateFormat(inst._settings.get_string('date-format'));
-        const expectedDate = targetModules.formatDateForDisplay(now, expectedFormat);
-        assertTrue(expectedDate.length > 0, 'test setup problem: expected a non-empty formatted date for the default format');
-        assertTrue(text.includes(`(${expectedDate})`), `row text does not contain the expected "(${expectedDate})" -- got: ${JSON.stringify(text)}`);
-      }
-    );
-
-    record('date feature: with "Show date" ON, the real PANEL label STILL does NOT contain a date -- the design-critical assertion (date must never reach the panel)', () => {
-      inst._updateLabel();
-      const panelText = inst._label.clutter_text.get_text();
-      assertFalse(/\(\d/.test(panelText), `expected no date addendum in the panel text even with Show date ON: ${JSON.stringify(panelText)}`);
-      // Also cross-checked against panelMarkup()'s own reconstruction (the
-      // exact markup _updateLabel() itself assembled), independent of what
-      // ClutterText ended up displaying.
-      const markup = panelMarkup(inst, targetModules);
-      assertFalse(/\(\d/.test(markup), `expected no date addendum in the reconstructed panel markup: ${JSON.stringify(markup)}`);
-    });
-
-    record('date feature: with "Show date" ON, even the PLAIN-TEXT PANEL FALLBACK (buildEntryText\'s OTHER real caller, engaged when markup rendering fails -- see the "invalid-markup case" test above) still does NOT contain a date -- proves the `full` discriminator inside _getLabelForTimezone() itself, not just "the panel normally uses a different code path"', () => {
-      // Same forcing technique as the "invalid-markup case" test above:
-      // temporarily makes _getMarkupForTimezone() return unparseable
-      // markup so _updateLabel() takes its real plain-text fallback
-      // branch, which calls the REAL _getLabelForTimezone({ item }) (no
-      // `full`) for every zone -- this IS "buildEntryText's panel usage"
-      // from the design brief, and is the one call site that could leak
-      // the date into the panel if the `full` check in
-      // _getLabelForTimezone() were ever removed/weakened (proven by
-      // temporarily removing it during verification of this test, see the
-      // PR/task report).
-      const originalGetMarkup = inst._getMarkupForTimezone.bind(inst);
-      inst._getMarkupForTimezone = () => '<b>unterminated MUTATION-STYLE invalid markup';
-      inst._label.clutter_text.set_markup('<b>SENTINEL-BEFORE-DATE-FALLBACK-TEST-' + GLib.get_monotonic_time() + '</b>');
-
-      try {
-        inst._updateLabel();
-      } finally {
-        inst._getMarkupForTimezone = originalGetMarkup;
-        inst._lastMarkupFailureLogTime = undefined;
-      }
-
-      const fallbackText = inst._label.text;
-      assertTrue(inst._label.clutter_text.get_use_markup() === false, 'expected the plain-text fallback to have actually engaged for this test to be meaningful');
-      assertFalse(/\(\d/.test(fallbackText), `expected no date addendum in the plain-text PANEL FALLBACK even with Show date ON: ${JSON.stringify(fallbackText)}`);
-
-      inst._label.text = 'SENTINEL-AFTER-DATE-FALLBACK-TEST-' + GLib.get_monotonic_time();
-      inst._updateLabel(); // restore real, valid rendering before later tests run
-    });
-
-    record('date feature: changing the real "date-format" gsetting to a different curated id changes the rendered row', () => {
-      inst._settings.set_string('date-format', 'iso');
-      inst._loadSettings(); // real settings-change pickup, mirrors the 'changed' listener's own call
-      inst._updateMenu();
-      const text = findActiveRowLabelText('UTC');
-      assertTrue(!!text, 'could not find the real UTC row to read its text from');
-
-      const glibTz = GLib.TimeZone.new('UTC');
-      const now = GLib.DateTime.new_now(glibTz);
-      // ISO 8601 date, e.g. "2026-07-20" -- a real, discriminating shape
-      // check distinct from the locale-default format asserted just above.
-      assertTrue(/\(\d{4}-\d{2}-\d{2}\)/.test(text), `expected an ISO-shaped "(YYYY-MM-DD)" date in the row text after switching to the "iso" format: ${JSON.stringify(text)}`);
-    });
-
-    record(
-      'date feature (live user click, menu still open, NO explicit refresh call): turning "Show date" back OFF via the real switch removes the date from the real visible row IMMEDIATELY -- round-trip proof of the same live-toggle path',
-      () => {
-        const entry = inst._configSwitches.showDate;
-        entry.item.toggle();
-        assertTrue(entry.getValue() === false, 'toggling "Show date" back off did not flip its stored value');
-        const text = findActiveRowLabelText('UTC'); // no explicit inst._updateMenu() call
-        assertTrue(!!text, 'could not find the real UTC row to read its text from');
-        assertFalse(/\(\d{4}-\d{2}-\d{2}\)/.test(text), `expected the date addendum to be gone again IMMEDIATELY after turning Show date off, no explicit refresh call: ${JSON.stringify(text)}`);
-      }
-    );
-
-    record(
-      'format24 feature (live user click, menu still open, NO explicit refresh call): toggling the real "24 hours format" switch OFF changes the real visible row\'s TIME shape IMMEDIATELY (12-hour AM/PM), proving the SAME class of staleness bug -- and the same fix -- applies to a switch other than "Show date"',
+      'format24 feature (live user click, menu still open, NO explicit refresh call): toggling the real "24 hours format" switch OFF changes the real visible row\'s TIME shape IMMEDIATELY (12-hour AM/PM), proving a config-switch toggle refreshes an already-open menu\'s real row actors, not just the panel label',
       () => {
         const entry = inst._configSwitches.format24;
         assertTrue(!!entry, 'no "format24" config switch tracked -- the popup menu switch was not added');
@@ -1557,7 +1405,7 @@ export default class ShellTestDriver extends Extension {
       }
     );
 
-    record('date feature: closes the real menu opened above -- everything through the format24 live-toggle test above ran with it open and no reopen', () => {
+    record('live-toggle staleness: closes the real menu opened above -- the format24 live-toggle test above ran with it open and no reopen', () => {
       inst._menu.close(BoxPointer.PopupAnimation.NONE);
     });
 
@@ -1581,7 +1429,7 @@ export default class ShellTestDriver extends Extension {
     const uiGroupChildCountAtEnable = Main.layoutManager.uiGroup.get_children().length;
 
     // =====================================================================
-    // 3d. Hover popup ("Show all zones on hover"): the harness cannot
+    // 3d. Hover popup ("Show dates on hover"): the harness cannot
     // synthesize real pointer-enter input (see the module doc comment and
     // tests/README.md's "Verification coverage" section -- the same
     // established limitation as pointer-driven DnD/AT-SPI input below),
@@ -1604,7 +1452,7 @@ export default class ShellTestDriver extends Extension {
     // section immediately below hard-codes that starting order.
     // =====================================================================
 
-    record('hover popup: "Show all zones on hover" is off by default (in-memory), and its popup-menu switch is tracked', () => {
+    record('hover popup: "Show dates on hover" is off by default (in-memory), and its popup-menu switch is tracked', () => {
       assertTrue(inst._config.showHoverPopup === false, 'showHoverPopup should default to false');
       assertTrue(!!inst._configSwitches.showHoverPopup, 'no "showHoverPopup" config switch tracked -- the popup menu switch was not added');
 
@@ -1614,7 +1462,7 @@ export default class ShellTestDriver extends Extension {
       // feature at all) produces. Field-level checks first (cheap, precise
       // about WHICH thing is missing if this ever regresses)...
       assertTrue(inst._hoverPopup === null, 'a hover-popup actor exists with the toggle off -- the popup must be created lazily, only when toggled on');
-      assertTrue(inst._hoverPopupBox === null, 'a hover-popup column container exists with the toggle off');
+      assertTrue(inst._hoverPopupBox === null, 'a hover-popup row container exists with the toggle off');
       assertTrue(inst._hoverSignalId === null, 'a "notify::hover" connection exists with the toggle off -- must only connect when the popup is created');
       assertTrue(inst._hoverShowTimeoutId === null, 'a hover-show timer is scheduled with the toggle off');
       // ...then the REAL, GObject/Clutter-level proof that would catch a
@@ -1652,9 +1500,10 @@ export default class ShellTestDriver extends Extension {
       // single save (see extension.js's own _saveSettings():
       // `this._settings.set_value('config', new GLib.Variant('a{sb}',
       // this._config))`, no per-key diffing). By the time this section
-      // runs, the "date feature" section above has already toggled the
-      // real "Show date" switch multiple times, and EVERY one of those
-      // toggles triggers a real _saveSettings() call that writes the
+      // runs, the "live-toggle staleness" section above has already
+      // toggled the real "24 hours format" switch multiple times, and
+      // EVERY one of those toggles triggers a real _saveSettings() call
+      // that writes the
       // WHOLE config object -- including showHoverPopup: false -- to
       // gsettings. That is correct, pre-existing, intentional product
       // behavior (not something this feature changed or should change),
@@ -1672,7 +1521,7 @@ export default class ShellTestDriver extends Extension {
       }
     });
 
-    record('hover popup: with the toggle OFF, invoking the real show path (_showHoverPopup()) is a harmless no-op -- with the lazy design there is no popup actor to build columns into or show at all', () => {
+    record('hover popup: with the toggle OFF, invoking the real show path (_showHoverPopup()) is a harmless no-op -- with the lazy design there is no popup actor to build rows into or show at all', () => {
       assertTrue(inst._hoverPopup === null, 'popup should not exist before this test (setup problem)');
       let threw = null;
       try {
@@ -1684,7 +1533,7 @@ export default class ShellTestDriver extends Extension {
       assertTrue(inst._hoverPopup === null, '_showHoverPopup() with the toggle off must not create a popup actor as a side effect');
     });
 
-    record('hover popup: toggling the real "Show all zones on hover" switch writes config.showHoverPopup, NOT date-format/formatting-defaults/separator, and lazily CREATES the popup actor + notify::hover connection', () => {
+    record('hover popup: toggling the real "Show dates on hover" switch writes config.showHoverPopup, NOT date-format/formatting-defaults/separator, and lazily CREATES the popup actor + notify::hover connection', () => {
       const entry = inst._configSwitches.showHoverPopup;
       const beforeDateFormat = inst._settings.get_string('date-format');
       const beforeSeparator = inst._settings.get_string('separator');
@@ -1707,7 +1556,7 @@ export default class ShellTestDriver extends Extension {
       // confirms the REAL signal connection (same rigour the teardown
       // section already uses for WallClock/GSettings/button signals).
       assertTrue(!!inst._hoverPopup, 'toggling on did not create the popup actor');
-      assertTrue(!!inst._hoverPopupBox, 'toggling on did not create the popup column container');
+      assertTrue(!!inst._hoverPopupBox, 'toggling on did not create the popup row container');
       assertTrue(!!inst._hoverSignalId, 'toggling on did not connect notify::hover');
       assertTrue(
         Main.layoutManager.uiGroup.get_children().includes(inst._hoverPopup),
@@ -1719,65 +1568,57 @@ export default class ShellTestDriver extends Extension {
       );
     });
 
-    record('hover popup: with the toggle ON, the real show path builds one zone column per active zone plus an interleaved separator column, in EXACT _activeOrder order -- top line reuses the REAL panel entry text, bottom line is that zone\'s date', () => {
+    record('hover popup: with the toggle ON, the real show path builds one DATE label per active zone plus an interleaved separator label, in EXACT _activeOrder order, with NO time/name/city text anywhere in the popup', () => {
       assertEqual(inst._activeOrder, ['UTC', 'America/New_York'], 'test setup problem: unexpected _activeOrder going into this test');
       inst._settings.set_string('date-format', 'iso');
       inst._loadSettings();
 
       inst._showHoverPopup();
 
-      const columns = inst._hoverPopupBox.get_children();
-      assertEqual(columns.length, 3, `expected exactly 3 columns (zone, separator, zone) for 2 active zones, got ${columns.length}`);
+      const labels = inst._hoverPopupBox.get_children();
+      assertEqual(labels.length, 3, `expected exactly 3 labels (date, separator, date) for 2 active zones, got ${labels.length}`);
 
-      const cellTexts = (columnBox) => columnBox.get_children().map((label) => label.text);
-      const [utcTop, utcBottom] = cellTexts(columns[0]);
-      const [sepTop, sepBottom] = cellTexts(columns[1]);
-      const [nyTop, nyBottom] = cellTexts(columns[2]);
+      const [utcText, sepText, nyText] = labels.map((label) => label.text);
 
-      // Top line: byte-identical to the REAL panel entry text for the
-      // same zone (_getLabelForTimezone({ item }), the exact function
-      // _updateLabel()'s own plain-text fallback uses) -- proves the
-      // popup reuses the panel's own text assembly instead of a second,
-      // potentially-drifting implementation, at the real shell level
-      // (the pure suite proves the callback-injection CONTRACT; this
-      // proves production actually WIRES the real callback through).
-      assertEqual(
-        utcTop,
-        inst._getLabelForTimezone({ item: inst._stateByZone.get('UTC') }),
-        `UTC top-line text does not match the real panel entry text: ${JSON.stringify(utcTop)}`
-      );
-      assertEqual(
-        nyTop,
-        inst._getLabelForTimezone({ item: inst._stateByZone.get('America/New_York') }),
-        `America/New_York top-line text does not match the real panel entry text: ${JSON.stringify(nyTop)}`
-      );
+      // Real date-format machinery reused, not a second implementation --
+      // ISO-shape check ("YYYY-MM-DD"), and independently cross-checked
+      // against the real formatDateForDisplay()/resolveDateFormat() for
+      // "right now" in each zone.
+      assertTrue(/^\d{4}-\d{2}-\d{2}$/.test(utcText), `expected an ISO-shaped date for UTC: ${JSON.stringify(utcText)}`);
+      assertTrue(/^\d{4}-\d{2}-\d{2}$/.test(nyText), `expected an ISO-shaped date for America/New_York: ${JSON.stringify(nyText)}`);
 
-      // Separator column: the same literal on BOTH lines, matching the
-      // real, currently-resolved panel separator (_resolveSeparatorValue()).
+      const glibTzUtc = GLib.TimeZone.new('UTC');
+      const expectedFormat = targetModules.resolveDateFormat(inst._settings.get_string('date-format'));
+      const expectedUtcDate = targetModules.formatDateForDisplay(GLib.DateTime.new_now(glibTzUtc), expectedFormat);
+      assertEqual(utcText, expectedUtcDate, `UTC date label does not match the real formatDateForDisplay() result: ${JSON.stringify(utcText)}`);
+
+      // Separator label: the same literal the panel itself joins its own
+      // entries with (_resolveSeparatorValue()).
       const expectedSeparator = inst._resolveSeparatorValue();
-      assertEqual(sepTop, expectedSeparator, `separator column top-line text does not match the real resolved separator: ${JSON.stringify(sepTop)}`);
-      assertEqual(sepBottom, expectedSeparator, `separator column bottom-line text does not match the real resolved separator: ${JSON.stringify(sepBottom)}`);
+      assertEqual(sepText, expectedSeparator, `separator label text does not match the real resolved separator: ${JSON.stringify(sepText)}`);
 
-      // Bottom line: real date-format machinery reused, not a second
-      // implementation -- same ISO-shape check the date-feature section
-      // above uses. Independent of (never equal to) the top line.
-      assertTrue(/^\d{4}-\d{2}-\d{2}$/.test(utcBottom), `expected an ISO-shaped date on UTC's bottom line: ${JSON.stringify(utcBottom)}`);
-      assertTrue(/^\d{4}-\d{2}-\d{2}$/.test(nyBottom), `expected an ISO-shaped date on America/New_York's bottom line: ${JSON.stringify(nyBottom)}`);
-      assertFalse(utcTop === utcBottom, 'top-line and bottom-line text must not be identical -- the two lines are independent');
+      // Design-critical assertion: NO time or name/city text anywhere in
+      // the popup -- the panel-style entry text for either active zone
+      // (city name, zone id, or a rendered time) must never appear.
+      const panelUtcText = inst._getLabelForTimezone({ item: inst._stateByZone.get('UTC') });
+      const panelNyText = inst._getLabelForTimezone({ item: inst._stateByZone.get('America/New_York') });
+      const allText = labels.map((label) => label.text).join(' ');
+      assertFalse(allText.includes(panelUtcText), `expected the popup to contain no panel-style entry text for UTC, but found it: ${JSON.stringify(allText)}`);
+      assertFalse(allText.includes(panelNyText), `expected the popup to contain no panel-style entry text for America/New_York, but found it: ${JSON.stringify(allText)}`);
+      assertFalse(/New York/.test(allText), `expected no city name anywhere in the dates-only popup: ${JSON.stringify(allText)}`);
 
       inst._hideHoverPopup();
     });
 
-    record('hover popup: columns are plain St.Label TEXT (never markup) -- a hostile label survives completely verbatim on the top line, with no <b>/<span> tags emitted, on either cell', () => {
+    record('hover popup: labels are plain St.Label TEXT (never markup) -- a hostile custom label on an active zone does not leak into the (dates-only) popup at all, and no label anywhere has use-markup enabled', () => {
       inst._labels['America/New_York'] = '<b>evil</b> & "quotes"';
       inst._showHoverPopup();
-      const columns = inst._hoverPopupBox.get_children();
-      const nyColumn = columns.find((columnBox) => columnBox.get_children()[0].text.includes('evil'));
-      assertTrue(!!nyColumn, 'could not find the hostile-label column');
-      const [topLabel, bottomLabel] = nyColumn.get_children();
-      assertTrue(topLabel.text.includes('<b>evil</b> & "quotes"'), `expected the hostile label verbatim in plain text: ${JSON.stringify(topLabel.text)}`);
-      assertTrue(topLabel.clutter_text.get_use_markup() === false, 'hover popup top-line label must never have use-markup enabled');
-      assertTrue(bottomLabel.clutter_text.get_use_markup() === false, 'hover popup bottom-line label must never have use-markup enabled');
+      const labels = inst._hoverPopupBox.get_children();
+      const allText = labels.map((label) => label.text).join(' ');
+      assertFalse(allText.includes('evil'), `expected the dates-only popup to never render a custom per-zone label at all: ${JSON.stringify(allText)}`);
+      labels.forEach((label, index) => {
+        assertTrue(label.clutter_text.get_use_markup() === false, `hover popup label ${index} must never have use-markup enabled`);
+      });
       inst._hideHoverPopup();
       delete inst._labels['America/New_York'];
     });
@@ -1787,17 +1628,17 @@ export default class ShellTestDriver extends Extension {
       assertEqual(inst._activeOrder, ['America/New_York', 'UTC'], 'test setup problem: reorder did not produce the expected order');
 
       inst._showHoverPopup();
-      const columns = inst._hoverPopupBox.get_children();
-      assertEqual(columns.length, 3, `expected exactly 3 columns after reorder, got ${columns.length}`);
-      const firstTop = columns[0].get_children()[0].text;
-      const lastTop = columns[2].get_children()[0].text;
-      // Panel-style (non-"full") entry text uses the CITY name derived
-      // from the zone id ("New York"), never the raw zone id itself --
-      // see _computeEntrySegments()'s `full`-false branch -- so this
-      // checks for that city-name form, matching what the real panel
-      // itself would show for this zone.
-      assertTrue(firstTop.includes('New York'), `expected column 0 to be America/New_York (panel-style "New York") after reorder: ${JSON.stringify(firstTop)}`);
-      assertTrue(lastTop.startsWith('UTC'), `expected column 2 to be UTC after reorder: ${JSON.stringify(lastTop)}`);
+      const labels = inst._hoverPopupBox.get_children();
+      assertEqual(labels.length, 3, `expected exactly 3 labels after reorder, got ${labels.length}`);
+
+      const glibTzNy = GLib.TimeZone.new('America/New_York');
+      const glibTzUtc = GLib.TimeZone.new('UTC');
+      const expectedFormat = targetModules.resolveDateFormat(inst._settings.get_string('date-format'));
+      const expectedNyDate = targetModules.formatDateForDisplay(GLib.DateTime.new_now(glibTzNy), expectedFormat);
+      const expectedUtcDate = targetModules.formatDateForDisplay(GLib.DateTime.new_now(glibTzUtc), expectedFormat);
+
+      assertEqual(labels[0].text, expectedNyDate, `expected label 0 to be America/New_York's date after reorder: ${JSON.stringify(labels[0].text)}`);
+      assertEqual(labels[2].text, expectedUtcDate, `expected label 2 to be UTC's date after reorder: ${JSON.stringify(labels[2].text)}`);
       inst._hideHoverPopup();
 
       // Restore the exact starting order the DnD section below hard-codes.
@@ -1805,15 +1646,7 @@ export default class ShellTestDriver extends Extension {
       assertEqual(inst._activeOrder, ['UTC', 'America/New_York'], 'failed to restore the original _activeOrder for the DnD section below');
     });
 
-    await recordAsync('hover popup: rendering -- the popup, every column, and every column\'s top/bottom labels are genuinely mapped with finite, non-collapsed allocation (not just present in the object graph), AND each column\'s top cell and bottom cell share the EXACT SAME real allocation box (column alignment proven at the real Clutter level, not just in the pure model)', async () => {
-      // A deliberately long custom label (much wider than any date
-      // string) on one zone, alongside the plain default on the other,
-      // so the top-line and bottom-line text naturally differ in width
-      // from column to column -- if every column's top/bottom cells
-      // still share the identical allocation box below, that is real
-      // proof of the FILL-based alignment mechanism, not an accident of
-      // both lines happening to already be the same width.
-      inst._labels['America/New_York'] = 'A Very Long Custom Label For Alignment Testing';
+    await recordAsync('hover popup: rendering -- the popup and every one of its date/separator labels are genuinely mapped with finite, non-collapsed allocation (not just present in the object graph), laid out left-to-right with no overlap', async () => {
       inst._showHoverPopup();
       await sleep(300);
       try {
@@ -1825,55 +1658,30 @@ export default class ShellTestDriver extends Extension {
         assertTrue(Number.isFinite(popupHeight) && popupHeight > 0, `popup allocation height is not finite/positive: ${popupHeight}`);
         assertTrue(Number.isFinite(popupWidth) && popupWidth > 0, `popup allocation width is not finite/positive: ${popupWidth}`);
 
-        const columns = inst._hoverPopupBox.get_children();
-        assertEqual(columns.length, 3, `expected exactly 3 columns, got ${columns.length}`);
+        const labels = inst._hoverPopupBox.get_children();
+        assertEqual(labels.length, 3, `expected exactly 3 labels, got ${labels.length}`);
 
-        columns.forEach((columnBox, index) => {
-          assertTrue(columnBox.mapped === true, `column ${index} is not mapped`);
-          const cells = columnBox.get_children();
-          assertEqual(cells.length, 2, `column ${index} does not have exactly a top and bottom cell`);
-          const [topLabel, bottomLabel] = cells;
-          assertTrue(topLabel.mapped === true, `column ${index}: top label is not mapped`);
-          assertTrue(bottomLabel.mapped === true, `column ${index}: bottom label is not mapped`);
-
-          const topBox = topLabel.get_allocation_box();
-          const bottomBox = bottomLabel.get_allocation_box();
-          [topBox.x1, topBox.x2, topBox.y1, topBox.y2, bottomBox.x1, bottomBox.x2, bottomBox.y1, bottomBox.y2].forEach((coord, coordIndex) => {
-            assertTrue(Number.isFinite(coord), `column ${index}: allocation coordinate #${coordIndex} is not finite`);
+        labels.forEach((label, index) => {
+          assertTrue(label.mapped === true, `label ${index} is not mapped`);
+          const box = label.get_allocation_box();
+          [box.x1, box.x2, box.y1, box.y2].forEach((coord, coordIndex) => {
+            assertTrue(Number.isFinite(coord), `label ${index}: allocation coordinate #${coordIndex} is not finite`);
           });
-          const topWidth = topBox.x2 - topBox.x1;
-          const bottomWidth = bottomBox.x2 - bottomBox.x1;
-          const topHeight = topBox.y2 - topBox.y1;
-          const bottomHeight = bottomBox.y2 - bottomBox.y1;
-          assertTrue(topWidth > 0, `column ${index}: top cell allocation width is not positive`);
-          assertTrue(bottomWidth > 0, `column ${index}: bottom cell allocation width is not positive`);
-          assertTrue(topHeight > 0, `column ${index}: top cell allocation height is not positive`);
-          assertTrue(bottomHeight > 0, `column ${index}: bottom cell allocation height is not positive`);
-
-          // THE alignment assertion: the top (entry/separator) cell and
-          // the bottom (date/separator) cell of the SAME column share
-          // the exact same real x-position AND width -- read from real
-          // Clutter allocation boxes after a real layout pass, not from
-          // the pure column model.
-          assertEqual(topBox.x1, bottomBox.x1, `column ${index}: top/bottom cell x1 differ (${topBox.x1} vs ${bottomBox.x1}) -- not aligned`);
-          assertEqual(topBox.x2, bottomBox.x2, `column ${index}: top/bottom cell x2 differ (${topBox.x2} vs ${bottomBox.x2}) -- not aligned`);
-          // Bottom cell must sit strictly below the top cell (two real
-          // stacked lines, not overlapping/collapsed).
-          assertTrue(bottomBox.y1 >= topBox.y2, `column ${index}: bottom cell (y1=${bottomBox.y1}) does not sit below the top cell (y2=${topBox.y2})`);
+          assertTrue(box.x2 - box.x1 > 0, `label ${index}: allocation width is not positive`);
+          assertTrue(box.y2 - box.y1 > 0, `label ${index}: allocation height is not positive`);
         });
 
-        // Cross-column sanity: successive columns must not overlap
-        // horizontally (a real left-to-right row of columns, not
-        // everything collapsed onto the same x).
-        for (let i = 1; i < columns.length; i++) {
-          const prevBox = columns[i - 1].get_allocation_box();
-          const curBox = columns[i].get_allocation_box();
-          assertTrue(curBox.x1 >= prevBox.x2, `column ${i} (x1=${curBox.x1}) overlaps the previous column (x2=${prevBox.x2})`);
+        // Cross-label sanity: successive labels must not overlap
+        // horizontally (a real left-to-right single row, not everything
+        // collapsed onto the same x).
+        for (let i = 1; i < labels.length; i++) {
+          const prevBox = labels[i - 1].get_allocation_box();
+          const curBox = labels[i].get_allocation_box();
+          assertTrue(curBox.x1 >= prevBox.x2, `label ${i} (x1=${curBox.x1}) overlaps the previous label (x2=${prevBox.x2})`);
         }
       } finally {
         inst._hideHoverPopup();
         await sleep(100);
-        delete inst._labels['America/New_York'];
       }
     });
 
@@ -2079,7 +1887,7 @@ export default class ShellTestDriver extends Extension {
         'the popup actor is still a child of uiGroup after an external config write turned the toggle back off'
       );
 
-      // Leave the real "Show all zones on hover" menu switch's own
+      // Leave the real "Show dates on hover" menu switch's own
       // tracked visual state consistent with the now-off gsetting, for
       // whatever runs after this (mirrors what _syncConfigSwitches()
       // itself already does on the next real menu open/settings change --
@@ -2325,13 +2133,18 @@ export default class ShellTestDriver extends Extension {
 
         // The real collision: toggle a real config switch -- the exact
         // 'toggled' handler that calls _refreshVisibleTimeLabels() -- WHILE
-        // the rename above is still open and uncommitted. showDate is used
-        // here (schema default false entering this test, restored below).
-        const dateEntry = inst._configSwitches.showDate;
-        assertTrue(!!dateEntry, 'no "showDate" config switch tracked -- the popup menu switch was not added');
-        assertTrue(dateEntry.getValue() === false, 'test setup problem: showDate is unexpectedly already true entering this test');
-        dateEntry.item.toggle();
-        assertTrue(dateEntry.getValue() === true, 'toggling "Show date" mid-rename did not flip its stored value');
+        // the rename above is still open and uncommitted. format24 is used
+        // here (schema default true entering this test, restored below) --
+        // the menu-row date switch this test originally used has since
+        // been removed (dates now live only in the hover popup), but
+        // format24 still changes a row's rendered TEXT (see
+        // _computeEntrySegments()), so it drives the exact same class of
+        // collision.
+        const formatEntry = inst._configSwitches.format24;
+        assertTrue(!!formatEntry, 'no "format24" config switch tracked -- the popup menu switch was not added');
+        assertTrue(formatEntry.getValue() === true, 'test setup problem: format24 is unexpectedly already false entering this test');
+        formatEntry.item.toggle();
+        assertTrue(formatEntry.getValue() === false, 'toggling "24 hours format" mid-rename did not flip its stored value');
 
         // The rename itself must be completely undisturbed.
         assertEqual(entry.get_text(), typed, 'the typed-but-uncommitted rename text was clobbered by a config-switch refresh happening mid-edit');
@@ -2344,23 +2157,23 @@ export default class ShellTestDriver extends Extension {
         assertEqual(inst._labels, beforeLabels, 'the "labels" gsetting was written despite no commit happening');
 
         // ...but the refresh must still have done its real job underneath:
-        // the row's HIDDEN St.Label text changed (a real date addendum now
-        // present), proving _refreshVisibleTimeLabels() genuinely found and
-        // updated this row's label rather than silently skipping it just
-        // because it is hidden right now.
+        // the row's HIDDEN St.Label text changed (a real 12-hour AM/PM
+        // time now present), proving _refreshVisibleTimeLabels() genuinely
+        // found and updated this row's label rather than silently skipping
+        // it just because it is hidden right now.
         assertTrue(label.text !== labelTextBefore, `the row's hidden St.Label was not refreshed underneath the in-progress rename: still ${JSON.stringify(label.text)}`);
         assertTrue(
-          /\(\d/.test(label.text),
-          `expected a "(<date...>" addendum in the row's hidden St.Label text after toggling Show date ON mid-rename: ${JSON.stringify(label.text)}`
+          /\b(AM|PM)\b/.test(label.text),
+          `expected a 12-hour AM/PM time in the row's hidden St.Label text after toggling "24 hours format" off mid-rename: ${JSON.stringify(label.text)}`
         );
 
-        // Round-trip showDate back off (leaves later sections' assumption
+        // Round-trip format24 back on (leaves later sections' assumption
         // of the schema default intact), then cancel the still-open rename
         // via the same real, argument-free key-focus-out mechanism the
         // test above uses, so this test leaves no open rename and no
         // written label behind.
-        dateEntry.item.toggle();
-        assertTrue(dateEntry.getValue() === false, 'round-trip toggle back to showDate=false did not flip its stored value');
+        formatEntry.item.toggle();
+        assertTrue(formatEntry.getValue() === true, 'round-trip toggle back to format24=true did not flip its stored value');
 
         entry.clutter_text.emit('key-focus-out'); // real cancelEdit()
         assertTrue(entry.visible === false, 'cancelEdit() did not hide the entry again after the mid-edit refresh test');
@@ -2389,13 +2202,17 @@ export default class ShellTestDriver extends Extension {
 
         const indicatorChildCountBefore = inst._dropIndicator.get_children().length;
 
-        const dateEntry = inst._configSwitches.showDate;
-        assertTrue(!!dateEntry, 'no "showDate" config switch tracked');
-        assertTrue(dateEntry.getValue() === false, 'test setup problem: showDate is unexpectedly already true entering this test');
+        // format24 drives this collision (the menu-row date switch this
+        // test originally used has since been removed -- see the
+        // mid-rename test above's own comment for why format24 is an
+        // equally valid, still-present stand-in).
+        const formatEntry = inst._configSwitches.format24;
+        assertTrue(!!formatEntry, 'no "format24" config switch tracked');
+        assertTrue(formatEntry.getValue() === true, 'test setup problem: format24 is unexpectedly already false entering this test');
 
         let threw = null;
         try {
-          dateEntry.item.toggle();
+          formatEntry.item.toggle();
         } catch (e) {
           threw = e;
         }
@@ -2404,8 +2221,8 @@ export default class ShellTestDriver extends Extension {
         assertTrue(inst._dropIndicator.get_parent() === inst._activeMenu.box, 'the drop indicator was removed/reparented by the refresh');
         assertEqual(inst._dropIndicator.get_children().length, indicatorChildCountBefore, 'the drop indicator gained/lost children -- it was mutated as if it were a row');
 
-        dateEntry.item.toggle(); // round-trip back to the schema default
-        assertTrue(dateEntry.getValue() === false, 'round-trip toggle back to showDate=false did not flip its stored value');
+        formatEntry.item.toggle(); // round-trip back to the schema default
+        assertTrue(formatEntry.getValue() === true, 'round-trip toggle back to format24=true did not flip its stored value');
 
         inst._clearDropIndicator(); // real cleanup method -- leaves state as a genuinely cancelled drag would
       }
@@ -2510,8 +2327,8 @@ export default class ShellTestDriver extends Extension {
       if (!hoverEntry.getValue()) {
         hoverEntry.item.toggle(); // real 'toggled' handler -> real _syncHoverPopupLifecycle() -> real _initHoverPopup()
       }
-      assertTrue(!!inst._hoverPopup, 'toggling "Show all zones on hover" back on did not (re)create the popup actor (test setup problem)');
-      assertTrue(!!inst._hoverSignalId, 'toggling "Show all zones on hover" back on did not (re)connect notify::hover (test setup problem)');
+      assertTrue(!!inst._hoverPopup, 'toggling "Show dates on hover" back on did not (re)create the popup actor (test setup problem)');
+      assertTrue(!!inst._hoverSignalId, 'toggling "Show dates on hover" back on did not (re)connect notify::hover (test setup problem)');
 
       snapshot = {
         clockObj: inst._systemClock,
@@ -3114,7 +2931,7 @@ export default class ShellTestDriver extends Extension {
     );
 
     await recordAsync(
-      'hover teardown: disable() after a session that NEVER touched the "Show all zones on hover" toggle (the lazy popup was never created at all) is clean -- no errors, uiGroup child count unaffected, every field already-null stays null',
+      'hover teardown: disable() after a session that NEVER touched the "Show dates on hover" toggle (the lazy popup was never created at all) is clean -- no errors, uiGroup child count unaffected, every field already-null stays null',
       async () => {
         // Normalize the PERSISTED 'config' gsetting back to
         // showHoverPopup=false first, via a genuinely throwaway

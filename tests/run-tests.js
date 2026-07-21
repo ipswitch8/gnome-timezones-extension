@@ -39,7 +39,7 @@ import {
   formatDateForDisplay,
 } from '../dateFormats.js';
 
-import { buildHoverPopupColumns } from '../hoverPopup.js';
+import { buildHoverPopupCells } from '../hoverPopup.js';
 
 import GLib from 'gi://GLib';
 
@@ -1471,182 +1471,147 @@ test('getEffectiveFormatting: empty-string formattingDefaults (schema default, "
 }
 
 // ---------------------------------------------------------------------
-// hoverPopup.js: pure column-model logic for the two-line "Show all
-// zones on hover" popup. Uses a fixed `now` per zone (via `nowForZone`)
-// so every assertion below is deterministic and never depends on the
-// wall clock at test-run time -- the same technique the
+// hoverPopup.js: pure cell-model logic for the ONE-LINE, DATES-ONLY
+// "Show dates on hover" popup. Uses a fixed `now` per zone (via
+// `nowForZone`) so every assertion below is deterministic and never
+// depends on the wall clock at test-run time -- the same technique the
 // formatDateForDisplay tests above use for a single zone, extended here
-// to per-zone injection since buildHoverPopupColumns() computes one
-// GLib.DateTime per zone. `getEntryText` is always a plain, deterministic
-// fake here (mirroring what extension.js's real
-// `(zone) => this._getLabelForTimezone({ item: ... })` callback would
-// return for a given zone/config, without needing a running gnome-shell)
-// -- the "reuses the panel's real entry-text assembly" guarantee itself
-// is proven by the shell-driver suite, which passes the REAL callback and
-// checks the popup's top line against the REAL panel text for the same
-// zone.
+// to per-zone injection since buildHoverPopupCells() computes one
+// GLib.DateTime per zone.
 // ---------------------------------------------------------------------
 
-test('buildHoverPopupColumns: one zone column per zone in activeOrder, in EXACT activeOrder order (not alphabetical, not membership-only), with a separator column interleaved between each pair', () => {
+test('buildHoverPopupCells: one date cell per zone in activeOrder, in EXACT activeOrder order (not alphabetical, not membership-only), with a separator cell interleaved between each pair', () => {
   const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
   const activeOrder = ['America/New_York', 'UTC', 'Asia/Tokyo'];
   const knownZones = new Set(activeOrder);
-  const columns = buildHoverPopupColumns({
+  const cells = buildHoverPopupCells({
     activeOrder,
     knownZones,
     dateFormat: 'iso',
     nowForZone: () => dt,
-    getEntryText: (zone) => `ENTRY(${zone})`,
     separatorValue: ' | ',
   });
   assertEqual(
-    columns.map((c) => c.type),
-    ['zone', 'separator', 'zone', 'separator', 'zone'],
-    'expected zone/separator/zone/separator/zone for 3 active zones'
+    cells.map((c) => c.type),
+    ['date', 'separator', 'date', 'separator', 'date'],
+    'expected date/separator/date/separator/date for 3 active zones'
   );
   assertEqual(
-    columns.filter((c) => c.type === 'zone').map((c) => c.zone),
+    cells.filter((c) => c.type === 'date').map((c) => c.zone),
     activeOrder,
-    'zone-column order must exactly match activeOrder, not any re-sorted order'
+    'date-cell order must exactly match activeOrder, not any re-sorted order'
   );
   assertTrue(
-    columns.filter((c) => c.type === 'separator').every((c) => c.text === ' | '),
-    'every separator column must carry the same separatorValue literal'
+    cells.filter((c) => c.type === 'separator').every((c) => c.text === ' | '),
+    'every separator cell must carry the same separatorValue literal'
   );
 });
 
-test('buildHoverPopupColumns: zone column entryText comes verbatim from the getEntryText callback (the panel-text reuse point) -- not recomputed here', () => {
+test('buildHoverPopupCells: dateText uses resolveDateFormat() -- a curated id resolves to its real pattern', () => {
   const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
-  const columns = buildHoverPopupColumns({
+  const isoCells = buildHoverPopupCells({
     activeOrder: ['UTC'],
     knownZones: new Set(['UTC']),
     dateFormat: 'iso',
     nowForZone: () => dt,
-    getEntryText: (zone) => `Home ${zone} 09:05 AM`,
     separatorValue: ' | ',
   });
-  assertEqual(columns.length, 1);
-  assertEqual(columns[0].entryText, 'Home UTC 09:05 AM', 'entryText must be exactly what getEntryText(zone) returned, untouched');
-});
-
-test('buildHoverPopupColumns: dateText uses resolveDateFormat() -- a curated id resolves to its real pattern, independent of entryText', () => {
-  const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
-  const isoColumns = buildHoverPopupColumns({
-    activeOrder: ['UTC'],
-    knownZones: new Set(['UTC']),
-    dateFormat: 'iso',
-    nowForZone: () => dt,
-    getEntryText: () => 'UTC 09:05',
-    separatorValue: ' | ',
-  });
-  const weekdayColumns = buildHoverPopupColumns({
+  const weekdayCells = buildHoverPopupCells({
     activeOrder: ['UTC'],
     knownZones: new Set(['UTC']),
     dateFormat: 'weekday',
     nowForZone: () => dt,
-    getEntryText: () => 'UTC 09:05',
     separatorValue: ' | ',
   });
-  assertEqual(isoColumns[0].dateText, '2026-07-20');
-  assertEqual(weekdayColumns[0].dateText, 'Monday');
-  assertEqual(isoColumns[0].entryText, weekdayColumns[0].entryText, 'entryText must not vary with dateFormat -- the two lines are independent');
+  assertEqual(isoCells[0].dateText, '2026-07-20');
+  assertEqual(weekdayCells[0].dateText, 'Monday');
 });
 
-test('buildHoverPopupColumns: reflects a reordered activeOrder (simulating _reorderActiveZone) without any extra work', () => {
+test('buildHoverPopupCells: reflects a reordered activeOrder (simulating _reorderActiveZone) without any extra work', () => {
   const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
   const knownZones = new Set(['UTC', 'America/New_York', 'Asia/Tokyo']);
-  const getEntryText = (zone) => zone;
-  const before = buildHoverPopupColumns({
+  const before = buildHoverPopupCells({
     activeOrder: ['UTC', 'America/New_York', 'Asia/Tokyo'],
     knownZones,
     dateFormat: 'iso',
     nowForZone: () => dt,
-    getEntryText,
     separatorValue: ' | ',
   });
-  const after = buildHoverPopupColumns({
+  const after = buildHoverPopupCells({
     activeOrder: ['Asia/Tokyo', 'UTC', 'America/New_York'],
     knownZones,
     dateFormat: 'iso',
     nowForZone: () => dt,
-    getEntryText,
     separatorValue: ' | ',
   });
-  assertEqual(before.filter((c) => c.type === 'zone').map((c) => c.zone), ['UTC', 'America/New_York', 'Asia/Tokyo']);
-  assertEqual(after.filter((c) => c.type === 'zone').map((c) => c.zone), ['Asia/Tokyo', 'UTC', 'America/New_York']);
+  assertEqual(before.filter((c) => c.type === 'date').map((c) => c.zone), ['UTC', 'America/New_York', 'Asia/Tokyo']);
+  assertEqual(after.filter((c) => c.type === 'date').map((c) => c.zone), ['Asia/Tokyo', 'UTC', 'America/New_York']);
 });
 
-test('buildHoverPopupColumns: an activeOrder entry not present in knownZones (stale/foreign entry) is silently skipped, and never gets a separator column of its own', () => {
+test('buildHoverPopupCells: an activeOrder entry not present in knownZones (stale/foreign entry) is silently skipped, and never gets a separator cell of its own', () => {
   const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
-  const columns = buildHoverPopupColumns({
+  const cells = buildHoverPopupCells({
     activeOrder: ['UTC', 'Not/A_Real_Zone', 'Asia/Tokyo'],
     knownZones: new Set(['UTC', 'Asia/Tokyo']),
     dateFormat: 'iso',
     nowForZone: () => dt,
-    getEntryText: (zone) => zone,
     separatorValue: ' | ',
   });
-  assertEqual(columns.map((c) => c.type), ['zone', 'separator', 'zone'], 'the stale zone must not produce a zone column, and must not leave a stray extra separator');
-  assertEqual(columns.filter((c) => c.type === 'zone').map((c) => c.zone), ['UTC', 'Asia/Tokyo']);
+  assertEqual(cells.map((c) => c.type), ['date', 'separator', 'date'], 'the stale zone must not produce a date cell, and must not leave a stray extra separator');
+  assertEqual(cells.filter((c) => c.type === 'date').map((c) => c.zone), ['UTC', 'Asia/Tokyo']);
 });
 
-test('buildHoverPopupColumns: empty activeOrder produces zero columns (matches the pre-existing empty-popup behavior)', () => {
-  const columns = buildHoverPopupColumns({
+test('buildHoverPopupCells: empty activeOrder produces zero cells (matches the pre-existing empty-popup behavior)', () => {
+  const cells = buildHoverPopupCells({
     activeOrder: [],
     knownZones: new Set(['UTC']),
     dateFormat: 'iso',
-    getEntryText: (zone) => zone,
     separatorValue: ' | ',
   });
-  assertEqual(columns, []);
+  assertEqual(cells, []);
 });
 
-test('buildHoverPopupColumns: a single active zone produces exactly one zone column and zero separator columns', () => {
+test('buildHoverPopupCells: a single active zone produces exactly one date cell and zero separator cells', () => {
   const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
-  const columns = buildHoverPopupColumns({
+  const cells = buildHoverPopupCells({
     activeOrder: ['UTC'],
     knownZones: new Set(['UTC']),
     dateFormat: 'iso',
     nowForZone: () => dt,
-    getEntryText: (zone) => zone,
     separatorValue: ' | ',
   });
-  assertEqual(columns.map((c) => c.type), ['zone'], 'a single zone must never get a leading/trailing separator column');
+  assertEqual(cells.map((c) => c.type), ['date'], 'a single zone must never get a leading/trailing separator cell');
 });
 
-test('buildHoverPopupColumns: separatorValue defaults to \'\' when omitted, rather than throwing or inserting undefined', () => {
+test('buildHoverPopupCells: separatorValue defaults to \'\' when omitted, rather than throwing or inserting undefined', () => {
   const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
-  const columns = buildHoverPopupColumns({
+  const cells = buildHoverPopupCells({
     activeOrder: ['UTC', 'Asia/Tokyo'],
     knownZones: new Set(['UTC', 'Asia/Tokyo']),
     dateFormat: 'iso',
     nowForZone: () => dt,
-    getEntryText: (zone) => zone,
   });
-  const separators = columns.filter((c) => c.type === 'separator');
+  const separators = cells.filter((c) => c.type === 'separator');
   assertEqual(separators.length, 1);
   assertEqual(separators[0].text, '');
 });
 
-test('buildHoverPopupColumns: entryText and dateText never contain any transformation of a hostile getEntryText/label result -- plain-text-only contract, verbatim survival', () => {
+test('buildHoverPopupCells: dateText comes verbatim from formatDateForDisplay -- plain-text-only contract, no transformation applied', () => {
   // Not an escaping test (this module never escapes anything -- see its
   // own module-header comment: plain text is rendered via St.Label.text,
   // never parsed as markup, so there is nothing to escape). This instead
-  // proves the CONTRACT: whatever a hostile getEntryText() result
-  // contains survives completely verbatim (no transformation at all),
-  // which is exactly what "never touches the markup surface" means in
-  // practice.
+  // proves the CONTRACT: whatever formatDateForDisplay() returns survives
+  // completely verbatim (no transformation at all) as dateText.
   const dt = GLib.DateTime.new_utc(2026, 7, 20, 9, 5, 0);
-  const hostileText = '<b>evil</b> & "quotes" \'apos\'';
-  const columns = buildHoverPopupColumns({
+  const expected = formatDateForDisplay(dt, resolveDateFormat('iso'));
+  const cells = buildHoverPopupCells({
     activeOrder: ['UTC'],
     knownZones: new Set(['UTC']),
     dateFormat: 'iso',
     nowForZone: () => dt,
-    getEntryText: () => hostileText,
     separatorValue: ' | ',
   });
-  assertEqual(columns[0].entryText, hostileText, 'expected the hostile getEntryText() result to survive completely verbatim');
+  assertEqual(cells[0].dateText, expected, 'expected dateText to be exactly what formatDateForDisplay() returned, untouched');
 });
 
 // ---------------------------------------------------------------------

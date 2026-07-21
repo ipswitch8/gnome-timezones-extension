@@ -11,8 +11,8 @@ Exercises `formatting.js`, `separators.js`, `dateFormats.js`, and
 RGBA->hex conversion (`rgbaToHex`), the per-zone/global-default
 precedence rule (`getEffectiveFormatting`), date-format resolution and
 null-safe formatting (`resolveDateFormat`/`formatDateForDisplay`), and
-the hover popup's two-line column model
-(`hoverPopup.js`'s `buildHoverPopupColumns()`). No GTK/Adw involved.
+the dates-only hover popup's single-line cell model
+(`hoverPopup.js`'s `buildHoverPopupCells()`). No GTK/Adw involved.
 
 (`formattingPresets.js` was deleted along with the popup menu's Font
 size/Color preset submenus -- prefs.js uses a real spin control and
@@ -399,19 +399,19 @@ for how it works.
   hostile payloads (proving Pango treats them as inert text, not just
   that the assembled string looks escaped) and a full write-path ->
   GSettings -> read-path pipeline test.
-- `hoverPopup.js`'s pure two-line column-model logic (`run-tests.js`):
-  exact `_activeOrder` ordering for zone columns (not membership-only,
-  not alphabetical), a separator column interleaved between every pair of
-  zone columns and never before the first/after the last, reflecting a
-  reorder, `entryText` coming verbatim from the injected `getEntryText`
-  callback (the panel-text-reuse point -- proven end to end against the
-  REAL callback by the shell-driver suite below) independent of
-  `dateText`, `dateText` via the real `resolveDateFormat()`/
-  `formatDateForDisplay()`, skipping stale/unknown zone ids (with no
-  stray separator column left behind), the empty/single-zone edge cases,
-  the `separatorValue` default, and that hostile `getEntryText()` output
-  survives completely verbatim (this module never escapes anything --
-  see its own module comment for why that is correct, not a gap).
+- `hoverPopup.js`'s pure single-line, dates-only cell-model logic
+  (`run-tests.js`): exact `_activeOrder` ordering for date cells (not
+  membership-only, not alphabetical), a separator cell interleaved
+  between every pair of date cells and never before the first/after the
+  last, reflecting a reorder, `dateText` via the real
+  `resolveDateFormat()`/`formatDateForDisplay()`, skipping stale/unknown
+  zone ids (with no stray separator cell left behind), the empty/
+  single-zone edge cases, the `separatorValue` default, and that
+  `dateText` survives completely verbatim from `formatDateForDisplay()`
+  (this module never escapes anything -- see its own module comment for
+  why that is correct, not a gap). This module has no dependency on
+  panel entry text at all (no times, no zone/city names) -- that
+  information already lives in the panel itself.
 - `prefs.js`'s real widget tree: construction, the exact `tzprefs-*`
   widget-name set, zero-write-on-open, per-zone override
   seeding/isolation/read-modify-write, "Clear override", and unknown/
@@ -740,46 +740,46 @@ Covered:
   is verified at the JS-bookkeeping level plus the source fact that
   `disable()` unconditionally disconnects it before nulling it, rather
   than via `g_signal_handler_is_connected()`.)
-- **Hover popup ("Show all zones on hover")**: now a TWO-LINE,
-  column-aligned display -- top line is every active zone's real
-  panel-style entry text (name/city per config, time), bottom line is
-  that zone's date, with the panel's own resolved separator interleaved
-  as its own column between every pair of zones on BOTH lines, e.g.:
+- **Hover popup ("Show dates on hover")**: a single line of DATES ONLY --
+  no time, no zone/city name/text (that information already lives in the
+  panel itself, "the normal display of the times") -- with the panel's
+  own resolved separator interleaved between every pair of zones, in
+  `_activeOrder` order, e.g.:
   ```
-  UTC 09:42  | New York 05:42 | Tokyo 18:42
-  20/07/2026 | 20/07/2026     | 21/07/2026
+  20/07/2026 | 20/07/2026 | 21/07/2026
   ```
-  The pure column-selection-and-ordering logic
-  (`hoverPopup.js`'s `buildHoverPopupColumns()`) is covered independently
+  The pure cell-selection-and-ordering logic
+  (`hoverPopup.js`'s `buildHoverPopupCells()`) is covered independently
   by `run-tests.js` (see below); this shell driver covers everything that
   logic alone cannot -- the real actor/signal/timer plumbing AND the real
   layout allocation in `extension.js`:
-  - **Content and exact order**: with the toggle ON, `_showHoverPopup()`
-    builds one vertical column (a top label over a bottom label) per zone
-    in `_activeOrder`, in that EXACT order (asserted by index, not just
-    membership), plus one separator column between every adjacent pair --
-    never before the first or after the last. Each zone column's TOP
-    label is asserted byte-identical to the REAL panel entry text for
-    that same zone (`inst._getLabelForTimezone({ item })`, the exact
-    function the panel's own plain-text fallback uses) -- proving, at the
-    real shell level, that the popup's top line is never a second,
-    independently-maintained rendering of the same information. Each zone
-    column's BOTTOM label is asserted to be an ISO-shaped date (reusing
-    the real `date-format` gsetting/`resolveDateFormat()`/
-    `formatDateForDisplay()` machinery -- the same check the date-feature
-    section above uses) and is asserted to differ from the top line.
-    Each separator column's top AND bottom labels are asserted equal to
-    the real, currently-resolved `_resolveSeparatorValue()`. A real
-    `_reorderActiveZone()` call is proven to change the column order on
+  - **Content and exact order, dates only**: with the toggle ON,
+    `_showHoverPopup()` builds one plain-text date label per zone in
+    `_activeOrder`, in that EXACT order (asserted by index, not just
+    membership), plus one separator label between every adjacent pair --
+    never before the first or after the last. Each date label is asserted
+    ISO-shaped and cross-checked byte-for-byte against the real
+    `date-format` gsetting/`resolveDateFormat()`/`formatDateForDisplay()`
+    machinery for that zone's "right now". Each separator label is
+    asserted equal to the real, currently-resolved
+    `_resolveSeparatorValue()`. The design-critical negative assertion:
+    neither active zone's real panel-style entry text
+    (`inst._getLabelForTimezone({ item })`) nor any city name appears
+    anywhere in the popup's combined text -- proving times/names never
+    leak into what is now a dates-only surface. A real
+    `_reorderActiveZone()` call is proven to change the label order on
     the NEXT show, then the order is restored for the DnD section that
     follows.
-  - **Plain-text-only, never markup**: a hostile per-zone label
-    (`<b>evil</b> & "quotes"`) survives completely verbatim in its zone
-    column's top-line `.text`, and `clutter_text.get_use_markup()` is
-    confirmed `false` for BOTH the top and bottom labels of that column --
-    proving this popup never touches the markup surface at all (see
-    `hoverPopup.js`'s own module comment for why that is a deliberate
-    design choice, not an oversight).
+  - **Plain-text-only, never markup, and a hostile custom label does not
+    leak in at all**: a hostile per-zone custom label
+    (`<b>evil</b> & "quotes"`) is set on an active zone and the popup is
+    shown -- since the popup no longer renders any per-zone label/entry
+    text at all (dates only), the hostile string is asserted absent from
+    the popup entirely, and `clutter_text.get_use_markup()` is confirmed
+    `false` for every label in the popup, proving this popup never
+    touches the markup surface at all (see `hoverPopup.js`'s own module
+    comment for why that is a deliberate design choice, not an
+    oversight).
   - **Lazy by design -- inert when disabled (karen-gate finding)**: with
     the toggle off (the schema default), this extension must add
     *nothing* to `Main.layoutManager.uiGroup` and connect *nothing* to
@@ -813,25 +813,20 @@ Covered:
     `uiGroup`'s child count -- `_teardownHoverPopup()` (the single
     teardown implementation both `disable()` and the lazy toggle-off path
     share) is a true no-op when there is nothing to tear down.
-  - **Rendering AND column alignment, not just object graph or model**:
-    after a real show (with one zone given a deliberately very long
-    custom label -- much wider than any date string -- so top-line and
-    bottom-line widths genuinely differ from column to column, rather
-    than accidentally already matching), the popup actor, every column
-    sub-box, and every column's top/bottom labels are confirmed
+  - **Rendering, not just object graph or model**: after a real show, the
+    popup actor and every date/separator label are confirmed
     `mapped === true` with a real, finite, positive `get_allocation_box()`
     -- the same class of check that catches the "empty submenu"/
     NaN-allocation bug class this project has hit before (see the
     karen-gate history on `this._separatorMenuItems` in `extension.js`).
-    Beyond that: for EVERY column (zone columns and the separator column
-    alike), the top cell's and bottom cell's real allocation boxes are
-    asserted to share the exact same `x1`/`x2` (the actual alignment
-    guarantee the two-line layout depends on, read from real Clutter
-    allocations after a real layout pass -- not inferred from the pure
-    column model, which has no concept of pixels at all), the bottom
-    cell is asserted to sit strictly below the top cell, and successive
-    columns are asserted not to overlap horizontally (a real
-    left-to-right row of columns).
+    Successive labels are asserted not to overlap horizontally (a real
+    left-to-right single row). Per-zone pixel alignment against the
+    panel is deliberately NOT attempted or asserted here -- the panel is
+    a single combined label, not one label per zone, so there is no
+    stable per-zone target to align a date under; see this feature's own
+    design note (flagged for the user) for why a single clean row of
+    dates, in the same order and with the same separator the panel uses,
+    is the target instead.
   - **Suppression, both directions**: with the real main menu open,
     `_showHoverPopup()` does not display the popup; opening the real main
     menu WHILE the hover popup is showing hides it (via the real,

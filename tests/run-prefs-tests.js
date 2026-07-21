@@ -282,7 +282,6 @@ function expectedWidgetNamesFor(zones) {
     'tzprefs-page',
     'tzprefs-defaults-group',
     'tzprefs-separator',
-    'tzprefs-show-date',
     'tzprefs-show-hover-popup',
     'tzprefs-date-format',
     'tzprefs-date-format-custom',
@@ -352,11 +351,11 @@ const KNOWN_ZONES = ['UTC', 'America/Los_Angeles'];
     assertEqual(settings.get_string('formatting-defaults'), beforeDefaults, 'formatting-defaults');
     assertEqual(settings.get_value('formatting').deep_unpack(), beforeFormatting, 'formatting');
     assertEqual(settings.get_strv('timezones'), beforeTimezones, 'timezones');
-    // Date feature additions: zero-interaction must also leave the new
-    // 'date-format' key AND the 'config' key (holding "Show date") alone --
-    // both are newly-touchable by this file as of this feature, so this
-    // guarantee is worth asserting explicitly, not just assumed to be
-    // covered by the pre-existing keys above.
+    // Hover-popup feature additions: zero-interaction must also leave the
+    // 'date-format' key AND the 'config' key (holding "showHoverPopup")
+    // alone -- both are newly-touchable by this file as of this feature,
+    // so this guarantee is worth asserting explicitly, not just assumed
+    // to be covered by the pre-existing keys above.
     assertEqual(settings.get_string('date-format'), beforeDateFormat, 'date-format');
     assertEqual(settings.get_value('config').deep_unpack(), beforeConfig, 'config');
   });
@@ -459,28 +458,22 @@ const KNOWN_ZONES = ['UTC', 'America/Los_Angeles'];
 }
 
 // =====================================================================
-// Suite 1c: date controls ("Show date" switch, the curated date-format
-// ComboRow, and the free-form custom EntryRow) -- initial displayed
-// values for both a curated stored id and a custom/literal stored value,
-// plus real interactions on each control.
+// Suite 1c: date-format controls (the curated date-format ComboRow and
+// the free-form custom EntryRow) -- initial displayed values for both a
+// curated stored id and a custom/literal stored value, plus real
+// interactions on each control. These feed the dates-only hover popup
+// (hoverPopup.js); there is no separate menu-row date switch any more.
 // =====================================================================
 
 {
   const settings = newSettings();
   settings.set_strv('timezones', KNOWN_ZONES);
-  settings.set_value('config', new GLib.Variant('a{sb}', { format24: true, showCity: true, showTimezone: false, hideSystemClock: false, showSeparator: false, showDate: true }));
   settings.set_string('date-format', 'iso'); // a curated id
 
   const prefsObj = new TimezonesPrefs();
   prefsObj.getSettings = () => settings;
   const window = new Adw.PreferencesWindow();
   prefsObj.fillPreferencesWindow(window);
-
-  test('"Show date" SwitchRow displays the current config.showDate value (true)', () => {
-    const widget = findByName(window, 'tzprefs-show-date');
-    assertTrue(widget !== null, 'tzprefs-show-date not found');
-    assertEqual(widget.active, true, 'Show date switch should display true');
-  });
 
   test('date-format ComboRow preselects the curated entry matching the stored id ("iso")', () => {
     const widget = findByName(window, 'tzprefs-date-format');
@@ -493,14 +486,6 @@ const KNOWN_ZONES = ['UTC', 'America/Los_Angeles'];
     const widget = findByName(window, 'tzprefs-date-format-custom');
     assertTrue(widget !== null, 'tzprefs-date-format-custom not found');
     assertEqual(widget.text, '', 'custom entry should be empty for a curated stored id');
-  });
-
-  test('toggling the real "Show date" switch writes config.showDate and NOT date-format/formatting-defaults', () => {
-    const widget = findByName(window, 'tzprefs-show-date');
-    widget.active = false;
-    const config = settings.get_value('config').deep_unpack();
-    assertEqual(config.showDate, false, 'config.showDate should now be false');
-    assertEqual(settings.get_string('date-format'), 'iso', 'date-format must be untouched by the Show date switch');
   });
 
   test('selecting a different curated entry on the real ComboRow writes its id to date-format', () => {
@@ -525,10 +510,8 @@ const KNOWN_ZONES = ['UTC', 'America/Los_Angeles'];
 }
 
 // =====================================================================
-// Suite 1c-2: "Show all zones on hover" switch (hover-popup feature) --
-// mirrors Suite 1c's "Show date" coverage exactly (same 'config' a{sb}
-// read-modify-write shape, same isolation from the unrelated
-// 'date-format'/'formatting-defaults' keys).
+// Suite 1c-2: "Show dates on hover" switch (the single hover-popup
+// toggle -- there is no separate menu-row date switch any more).
 // =====================================================================
 
 {
@@ -542,7 +525,6 @@ const KNOWN_ZONES = ['UTC', 'America/Los_Angeles'];
       showTimezone: false,
       hideSystemClock: false,
       showSeparator: false,
-      showDate: false,
       showHoverPopup: true,
     })
   );
@@ -552,13 +534,13 @@ const KNOWN_ZONES = ['UTC', 'America/Los_Angeles'];
   const window = new Adw.PreferencesWindow();
   prefsObj.fillPreferencesWindow(window);
 
-  test('"Show all zones on hover" SwitchRow displays the current config.showHoverPopup value (true)', () => {
+  test('"Show dates on hover" SwitchRow displays the current config.showHoverPopup value (true)', () => {
     const widget = findByName(window, 'tzprefs-show-hover-popup');
     assertTrue(widget !== null, 'tzprefs-show-hover-popup not found');
-    assertEqual(widget.active, true, 'Show all zones on hover switch should display true');
+    assertEqual(widget.active, true, 'Show dates on hover switch should display true');
   });
 
-  test('toggling the real "Show all zones on hover" switch writes config.showHoverPopup and NOT date-format/formatting-defaults/other config fields', () => {
+  test('toggling the real "Show dates on hover" switch writes config.showHoverPopup and NOT date-format/formatting-defaults/other config fields', () => {
     const widget = findByName(window, 'tzprefs-show-hover-popup');
     const beforeDateFormat = settings.get_string('date-format');
     const beforeFormattingDefaults = settings.get_string('formatting-defaults');

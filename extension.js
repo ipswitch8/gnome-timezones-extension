@@ -28,8 +28,7 @@ import {
   getEffectiveFormatting,
 } from './formatting.js';
 import { SEPARATORS, resolveSeparatorValue } from './separators.js';
-import { resolveDateFormat, formatDateForDisplay } from './dateFormats.js';
-import { buildHoverPopupColumns } from './hoverPopup.js';
+import { buildHoverPopupCells } from './hoverPopup.js';
 // KAREN-GATE FIX (round 4, live-testing report): formattingPresets.js
 // (FONT_SIZE_PRESETS/COLOR_PALETTE/resolvePresetId) was ONLY ever used by
 // the popup menu's own "Font size"/"Color" submenus (round 2), both
@@ -47,7 +46,7 @@ import { buildHoverPopupColumns } from './hoverPopup.js';
 // Whitelist of the only config keys this extension ever reads/writes.
 // Anything else present in the 'config' GSettings value (e.g. from a
 // tampered/foreign dconf entry) is ignored rather than blindly copied.
-const CONFIG_KEYS = ['format24', 'showCity', 'showTimezone', 'hideSystemClock', 'showSeparator', 'showDate', 'showHoverPopup'];
+const CONFIG_KEYS = ['format24', 'showCity', 'showTimezone', 'hideSystemClock', 'showSeparator', 'showHoverPopup'];
 
 // Delay (ms) between the pointer entering the panel button and the hover
 // popup actually opening -- mirrors the ordinary "tooltip" convention of
@@ -105,25 +104,17 @@ export default class TimezonesExtension extends Extension {
       showTimezone: false,
       hideSystemClock: false,
       showSeparator: false,
-      // Whether each menu-row's FULL form (see _getLabelForTimezone()'s
-      // `full` parameter) also shows that zone's current date. Deliberately
-      // a genuine 'config' a{sb} boolean like every other switch above --
-      // NOT part of "formatting"/"formatting-defaults" (which govern
-      // per-entry Pango-markup appearance, not whether a whole extra
-      // segment is shown at all) and NOT its own dedicated GSettings key
-      // (unlike the "date-format" string key just below, which the actual
-      // format pattern this toggle's date is rendered with comes from).
-      showDate: false,
       // Hover-popup feature: a genuine 'config' a{sb} boolean, same
       // shape/pattern as every switch above -- OFF by default (feature
       // spec requirement). Whether hovering the panel clock shows a
-      // BoxPointer-based popup listing every ACTIVE zone in
-      // this._activeOrder order, each with its current time and date
-      // (reusing the SAME 'date-format' key/resolveDateFormat()/
-      // formatDateForDisplay() machinery every other date-rendering call
-      // site in this file already uses -- see hoverPopup.js). See
-      // _initHoverPopup()/_showHoverPopup()/_hideHoverPopup() below for
-      // the actor/timer/signal plumbing.
+      // BoxPointer-based popup listing every ACTIVE zone's current DATE
+      // ONLY (no time, no name/city text -- that already lives in the
+      // panel itself), in this._activeOrder order (reusing the SAME
+      // 'date-format' key/resolveDateFormat()/formatDateForDisplay()
+      // machinery every other date-rendering call site in this file
+      // already uses -- see hoverPopup.js). See _initHoverPopup()/
+      // _showHoverPopup()/_hideHoverPopup() below for the actor/timer/
+      // signal plumbing.
       showHoverPopup: false
     };
     this._hint = '';
@@ -138,8 +129,8 @@ export default class TimezonesExtension extends Extension {
     // Raw stored 'date-format' key value (resolved to a literal
     // GLib.DateTime.format() pattern at render time via
     // resolveDateFormat(), exactly like this._separatorId/
-    // resolveSeparatorValue() above). Only ever consulted when
-    // this._config.showDate is true -- see _getLabelForTimezone().
+    // resolveSeparatorValue() above). Only ever consulted by the
+    // dates-only hover popup -- see _rebuildHoverPopupRow()/hoverPopup.js.
     this._dateFormat = '';
     this._formatting = {};
     this._formattingDefaults = { ...DEFAULT_FORMATTING };
@@ -640,9 +631,10 @@ export default class TimezonesExtension extends Extension {
     let separatorVariant = this._settings.get_value('separator');
     this._separatorId = separatorVariant.deep_unpack();
 
-    // Date feature: raw stored value only, same "resolve at render time"
-    // convention as 'separator' immediately above -- see
-    // _getLabelForTimezone()'s use of resolveDateFormat(this._dateFormat).
+    // Date-format: raw stored value only, same "resolve at render time"
+    // convention as 'separator' immediately above -- consulted only by
+    // the dates-only hover popup (_rebuildHoverPopupRow()/hoverPopup.js's
+    // resolveDateFormat(this._dateFormat)).
     let dateFormatVariant = this._settings.get_value('date-format');
     this._dateFormat = dateFormatVariant.deep_unpack();
 
@@ -825,29 +817,27 @@ export default class TimezonesExtension extends Extension {
     this._addConfigSwitch({ label: 'Show timezone', name: 'showTimezone' });
     this._addConfigSwitch({ label: 'Hide system clock', name: 'hideSystemClock' });
     this._addConfigSwitch({ label: 'Show separator', name: 'showSeparator' });
-    // Date feature: an ordinary 'config' a{sb} boolean switch, same
-    // no-parentMenu/no-getValue/no-setValue shape as every switch above --
-    // _addConfigSwitch()'s defaults (read/write this._config.showDate +
-    // _saveSettings()) are exactly right for it. The actual date FORMAT is
-    // global, prefs.js-only (no popup-menu picker for it, mirroring how
-    // "Font size"/"Color" are prefs.js-only -- see the Round 1-4 history
-    // comment on this._separatorMenuItems above for why this popup avoids
-    // adding more pickers than it can comfortably render).
-    this._addConfigSwitch({ label: 'Show date', name: 'showDate' });
-    // Hover-popup feature: a 'config' a{sb} boolean switch, but with a
-    // custom setValue (unlike every switch above) so toggling it also
-    // drives the popup's own lazy create/destroy -- see
-    // _syncHoverPopupLifecycle()'s own comment for why this needs to be
-    // lazy at all (karen-gate finding: "off costs nothing" is a hard
-    // requirement -- HEAD carries no hidden actor/signal when this
-    // extension is used without the feature, and this extension must
-    // not either). The popup itself is NOT part of this._menu's own
-    // actor tree (see _initHoverPopup()): it is a separate, standalone
-    // BoxPointer added directly to Main.layoutManager.uiGroup, shown on
-    // panel-button hover rather than click, and now only ever created
-    // while the toggle is genuinely on.
+    // Hover-popup feature: a single 'config' a{sb} boolean switch (the
+    // ONLY control for this feature -- there is no separate "show date in
+    // the menu" switch any more, see this._config.showHoverPopup's own
+    // comment in the constructor), with a custom setValue (unlike every
+    // switch above) so toggling it also drives the popup's own lazy
+    // create/destroy -- see _syncHoverPopupLifecycle()'s own comment for
+    // why this needs to be lazy at all (karen-gate finding: "off costs
+    // nothing" is a hard requirement -- HEAD carries no hidden actor/
+    // signal when this extension is used without the feature, and this
+    // extension must not either). The popup itself is NOT part of
+    // this._menu's own actor tree (see _initHoverPopup()): it is a
+    // separate, standalone BoxPointer added directly to
+    // Main.layoutManager.uiGroup, shown on panel-button hover rather than
+    // click, and only ever created while the toggle is genuinely on.
+    //
+    // The key stays named `showHoverPopup` (not renamed) purely so an
+    // already-saved user value in an existing dconf database is not
+    // orphaned -- only the user-visible label changed, to describe the
+    // simplified, dates-only popup this now drives (see hoverPopup.js).
     this._addConfigSwitch({
-      label: 'Show all zones on hover',
+      label: 'Show dates on hover',
       name: 'showHoverPopup',
       setValue: (value) => {
         this._config.showHoverPopup = value;
@@ -988,7 +978,7 @@ export default class TimezonesExtension extends Extension {
     this._syncHoverPopupLifecycle();
   }
 
-  // --- Hover popup: "Show all zones on hover" ---
+  // --- Hover popup: "Show dates on hover" ---
   //
   // DESIGN: a single BoxPointer (imports.ui.boxpointer / this file's own
   // `BoxPointer` import), NOT a second PopupMenu.PopupMenu. this._button
@@ -999,13 +989,13 @@ export default class TimezonesExtension extends Extension {
   // with no modal grab, no keyboard nav, no 'activate' handling -- so it
   // coexists with this._menu cleanly. Built once in _initHoverPopup()
   // (called from _syncHoverPopupLifecycle(), itself called from
-  // _initMenu() and from every toggle of the "Show all zones on hover"
+  // _initMenu() and from every toggle of the "Show dates on hover"
   // switch/gsetting) rather than freshly per-hover: unlike
   // this._dropIndicator (a genuinely transient, created-and-destroyed-
   // per-drag actor), this popup is shown/hidden repeatedly for as long as
   // the toggle stays on, so building it once per "toggle turned on" and
-  // reusing it (rebuilding only its COLUMN CONTENT on each show, via
-  // _rebuildHoverPopupColumns()) is the simpler, lower-churn choice --
+  // reusing it (rebuilding only its ROW CONTENT on each show, via
+  // _rebuildHoverPopupRow()) is the simpler, lower-churn choice --
   // exactly how this._menu/this._activeMenu themselves are already
   // handled (built once in _initMenu(), rows rebuilt on each open via
   // _updateActiveMenu()).
@@ -1020,7 +1010,7 @@ export default class TimezonesExtension extends Extension {
   // is the single place that decides whether the popup should currently
   // exist and creates/destroys it to match -- called from _initMenu()
   // (using the config _loadSettings() already loaded), from the
-  // "Show all zones on hover" switch's own setValue (menu-driven
+  // "Show dates on hover" switch's own setValue (menu-driven
   // toggle), and from the settings 'changed' handler in enable()
   // (external/dconf-driven toggle) -- so there is exactly one code path
   // that ever decides this, regardless of which of those three triggered
@@ -1054,7 +1044,7 @@ export default class TimezonesExtension extends Extension {
   // exactly one place regardless of which one triggers it:
   //   1. _initMenu() (once per enable(), using whatever _loadSettings()
   //      already loaded into this._config.showHoverPopup).
-  //   2. The "Show all zones on hover" switch's own setValue (a genuine
+  //   2. The "Show dates on hover" switch's own setValue (a genuine
   //      user click on the menu switch).
   //   3. The settings 'changed' handler in enable() (an EXTERNAL toggle,
   //      e.g. `gsettings set`/dconf-editor/another instance of this same
@@ -1096,9 +1086,9 @@ export default class TimezonesExtension extends Extension {
   //      this._settingsChangedId, this._labelStyleChangedId).
   //   3. Destroy this._hoverPopup itself (a real Clutter.Actor added to
   //      Main.layoutManager.uiGroup in _initHoverPopup()) -- this also
-  //      destroys this._hoverPopupBox and every column sub-box (and each
-  //      column's two labels) inside it, since they are all its
-  //      descendants; no separate destroy call is needed for those.
+  //      destroys this._hoverPopupBox and every date/separator label
+  //      inside it, since they are all its descendants; no separate
+  //      destroy call is needed for those.
   _teardownHoverPopup() {
     this._cancelHoverPopupShowTimeout();
 
@@ -1120,18 +1110,18 @@ export default class TimezonesExtension extends Extension {
     this._hoverPopup.add_style_class_name('popup-menu');
     // Automation-friendly per project convention (see _addConfigSwitch()'s
     // own comment on accessible_name): there is no interactive control
-    // inside this popup to name individually beyond the columns themselves
-    // (each column's own accessible_name is set in
-    // _rebuildHoverPopupColumns()), but the container itself still gets a
+    // inside this popup to name individually beyond the date/separator
+    // labels themselves (each one's own accessible_name is set in
+    // _rebuildHoverPopupRow()), but the container itself still gets a
     // stable name for tooling.
     this._hoverPopup.accessible_name = 'Timezones hover popup';
 
-    // HORIZONTAL row of per-column vertical sub-boxes -- see
-    // _rebuildHoverPopupColumns()'s own comment for the full two-line
-    // layout (top: panel-style entry text per zone; bottom: that zone's
-    // date; separators interleaved between zone columns on both lines).
-    // `vertical: false` here is what makes this a row of columns rather
-    // than the old one-row-per-zone vertical list.
+    // A single HORIZONTAL row of plain-text labels -- see
+    // _rebuildHoverPopupRow()'s own comment for the full one-line,
+    // dates-only layout (one date label per active zone, separator labels
+    // interleaved between them, in this._activeOrder order -- no time,
+    // no name/city text). `vertical: false` here is what makes this a
+    // single row rather than the old two-line/per-column layout.
     this._hoverPopupBox = new St.BoxLayout({
       vertical: false,
       style_class: 'popup-menu-content'
@@ -1209,7 +1199,7 @@ export default class TimezonesExtension extends Extension {
     }
   }
 
-  // Rebuilds this._hoverPopupBox's column content from the CURRENT
+  // Rebuilds this._hoverPopupBox's row content from the CURRENT
   // this._activeOrder (so a reorder or an activate/deactivate that
   // happened while the pointer was merely resting, before the popup was
   // ever shown, is always reflected -- this is called fresh on every
@@ -1233,7 +1223,7 @@ export default class TimezonesExtension extends Extension {
       return;
     }
 
-    this._rebuildHoverPopupColumns();
+    this._rebuildHoverPopupRow();
 
     if (this._hoverPopupBox.get_n_children() === 0) {
       return;
@@ -1257,44 +1247,26 @@ export default class TimezonesExtension extends Extension {
     }
   }
 
-  // Destroys and rebuilds every column in this._hoverPopupBox from
-  // this._activeOrder, via the PURE buildHoverPopupColumns() helper
-  // (hoverPopup.js) -- kept pure/shell-independent so the column-
+  // Destroys and rebuilds every child in this._hoverPopupBox from
+  // this._activeOrder, via the PURE buildHoverPopupCells() helper
+  // (hoverPopup.js) -- kept pure/shell-independent so the zone-
   // selection-and-ordering logic is unit-testable without a running
   // gnome-shell (see tests/run-tests.js).
   //
-  // TWO-LINE, COLUMN-ALIGNED LAYOUT: each column returned by
-  // buildHoverPopupColumns() (a 'zone' column: entry text + date text, or
-  // a 'separator' column: the same literal on both lines) becomes its own
-  // vertical St.BoxLayout -- a top PLAIN-TEXT St.Label over a bottom
-  // PLAIN-TEXT St.Label -- appended left-to-right into
-  // this._hoverPopupBox (a HORIZONTAL box, see _initHoverPopup()). This
-  // is the LAYOUT ENGINE doing the column-alignment work, not string
-  // padding: a column's width is the max of its own two labels' natural
-  // widths (ordinary vertical-box sizing), so the date cell and its
-  // zone's entry cell -- and every separator cell on both lines -- always
-  // line up exactly, regardless of font metrics/proportional-width text.
-  // String-padding a flat two-line pair of strings could not give that
-  // guarantee.
-  //
-  // ALIGNMENT MECHANISM: every label below gets an explicit
-  // `x_align: Clutter.ActorAlign.FILL` -- St's box-layout implementation
-  // gives each child the container's FULL cross-axis (here: width) extent
-  // to allocate into regardless of align, but FILL is the only align
-  // value that is guaranteed, by definition ("use exactly the box given,
-  // no align-driven shrink-to-natural-size adjustment"), to make BOTH
-  // labels in a column end up with IDENTICALLY the same allocation box --
-  // which is exactly what "the date sits in the same column as its
-  // zone's entry" requires at the real allocation level, not just in the
-  // model. `style: 'text-align: center;'` then centers each label's own
-  // TEXT within that shared-width cell for a look that reads naturally
-  // (a shorter date centered under a wider time-and-name entry, or vice
-  // versa) -- CENTER rather than START because a left-anchored date under
-  // a much wider entry (or a left-anchored entry under a wider date)
-  // reads as visually disconnected from the column above/below it; CSS
-  // text-align only affects the Pango layout inside the label, never its
-  // own actor allocation, so it cannot undermine the FILL-based alignment
-  // guarantee above.
+  // ONE LINE, DATES ONLY: each cell returned by buildHoverPopupCells()
+  // (a 'date' cell: that zone's current date text, or a 'separator'
+  // cell: the panel's own separator literal) becomes a single PLAIN-TEXT
+  // St.Label, appended left-to-right into this._hoverPopupBox (a
+  // HORIZONTAL box, see _initHoverPopup()). There is deliberately no
+  // per-zone TIME or name/city text here any more, and therefore no
+  // column-alignment machinery is needed -- an ordinary horizontal box of
+  // labels, in the same order and with the same separator literal the
+  // panel itself uses, already reads as "the dates for the zones you see
+  // above, in the same order" without needing to line each date up
+  // pixel-for-pixel under its own zone's panel entry (the panel is a
+  // single combined label, not one label per zone, so per-zone alignment
+  // against it would have no stable target to align to in the first
+  // place).
   //
   // PLAIN TEXT ONLY: every label uses `.text` (`new St.Label({ text })`),
   // never `.clutter_text.set_markup()` -- see hoverPopup.js's own
@@ -1305,55 +1277,27 @@ export default class TimezonesExtension extends Extension {
   // formatting (design requirement -- purely informational), so
   // formatting.js's buildEntryMarkup()/getEffectiveFormatting() are never
   // consulted here.
-  _rebuildHoverPopupColumns() {
+  _rebuildHoverPopupRow() {
     this._hoverPopupBox.get_children().forEach((child) => child.destroy());
 
-    let columns = buildHoverPopupColumns({
+    let cells = buildHoverPopupCells({
       activeOrder: this._activeOrder,
       knownZones: this._stateByZone,
       dateFormat: this._dateFormat,
-      separatorValue: this._resolveSeparatorValue(),
-      // Reuses the exact same panel-entry-text assembly the panel itself
-      // falls back to as plain text (_updateLabel()'s `plainText`
-      // closure) -- see hoverPopup.js's module header for why this is a
-      // callback rather than ingredients this popup would otherwise have
-      // to re-derive the panel's showCity/showTimezone/format24/custom-
-      // label decision from (a second, driftable implementation).
-      getEntryText: (zone) => this._getLabelForTimezone({ item: this._stateByZone.get(zone) })
+      separatorValue: this._resolveSeparatorValue()
     });
 
-    columns.forEach((column) => {
-      let columnBox = new St.BoxLayout({ vertical: true });
+    cells.forEach((cell) => {
+      let text = cell.type === 'separator' ? cell.text : cell.dateText;
 
-      let topText;
-      let bottomText;
-      if (column.type === 'separator') {
-        topText = column.text;
-        bottomText = column.text;
-        columnBox.accessible_name = `Separator: ${column.text}`;
-      } else {
-        topText = column.entryText;
-        bottomText = column.dateText;
-        columnBox.accessible_name = `${column.entryText} ${column.dateText}`.trim();
-      }
-
-      let topLabel = new St.Label({
-        text: topText,
+      let label = new St.Label({
+        text,
         x_align: Clutter.ActorAlign.FILL,
         style: 'text-align: center;'
       });
-      topLabel.accessible_name = topText;
+      label.accessible_name = cell.type === 'separator' ? `Separator: ${text}` : text;
 
-      let bottomLabel = new St.Label({
-        text: bottomText,
-        x_align: Clutter.ActorAlign.FILL,
-        style: 'text-align: center;'
-      });
-      bottomLabel.accessible_name = bottomText;
-
-      columnBox.add_child(topLabel);
-      columnBox.add_child(bottomLabel);
-      this._hoverPopupBox.add_child(columnBox);
+      this._hoverPopupBox.add_child(label);
     });
   }
 
@@ -1865,35 +1809,7 @@ export default class TimezonesExtension extends Extension {
   // identical to the pre-Phase-2 output for the same inputs.
   _getLabelForTimezone({ item, full, nameOverride }) {
     let segments = this._computeEntrySegments({ item, full, nameOverride });
-    let text = buildEntryText(segments);
-
-    // Date feature: appended ONLY to the full form (menu rows and the
-    // drag-actor preview, per this method's own header comment) -- NEVER
-    // to the panel, which always calls this with `full` falsy (see
-    // _updateLabel()'s `plainText` fallback closure, the only non-`full`
-    // caller). `full` is exactly the same discriminator
-    // _computeEntrySegments() already uses to decide "menu row" vs "panel"
-    // shape above, so this reuses it rather than introducing a second,
-    // possibly-diverging condition.
-    //
-    // Placement: appended at the very end, in parentheses, e.g.
-    // "Home (America/Los_Angeles) EST 7:00 AM (2026-07-20)" -- after the
-    // time, not interleaved with the existing "Name (zone/id) …" prefix
-    // structure (which _computeEntrySegments() already builds and which
-    // this deliberately leaves untouched), so the date reads as a final,
-    // clearly-delimited addendum rather than competing with the zone-id
-    // parenthetical earlier in the same string.
-    if (full && this._config.showDate) {
-      let glibTimezone = GLib.TimeZone.new(item.timezone);
-      let now = GLib.DateTime.new_now(glibTimezone);
-      let formatString = resolveDateFormat(this._dateFormat);
-      let dateText = formatDateForDisplay(now, formatString);
-      if (dateText) {
-        text = `${text} (${dateText})`;
-      }
-    }
-
-    return text;
+    return buildEntryText(segments);
   }
 
   // Pango-markup form of a single panel entry: per-segment bold and
@@ -2008,27 +1924,26 @@ export default class TimezonesExtension extends Extension {
     this._state.forEach((item) => (item.label = this._getLabelForTimezone({ item: item, full: true })));
   }
 
-  // Live-testing report ("Show Date only works when 'Show all zones on
-  // hover' is enabled as well"): ROOT CAUSE was never a real dependency
-  // between the two switches -- every config switch's 'toggled' handler
-  // (_addConfigSwitch(), below) wrote the new value and refreshed only
-  // this._label (the PANEL), never this._state's cached item.label or the
-  // already-open menu's row actors. Those are only ever refreshed by
-  // _updateMenu(), which historically only ran on menu OPEN
-  // (open-state-changed) or _clearClocks() -- so toggling e.g. "Show
-  // date" while the menu was already open (the only way to reach the
-  // switch at all) left every visible row showing its stale pre-toggle
-  // text until the menu was closed and reopened. The hover popup never
-  // shows this staleness because _showHoverPopup() rebuilds its columns
-  // from scratch on every show (see hoverPopup.js) -- which is almost
-  // certainly why the user perceived a dependency: enabling hover was the
-  // first thing that showed them a freshly-rendered date, not because it
-  // unblocked "Show date" in any real sense.
+  // Live-testing report (originally surfaced via a now-removed
+  // menu-row date switch, but the root cause was never specific to that
+  // switch): every config switch's 'toggled' handler (_addConfigSwitch(),
+  // below) wrote the new value and refreshed only this._label (the
+  // PANEL), never this._state's cached item.label or the already-open
+  // menu's row actors. Those are only ever refreshed by _updateMenu(),
+  // which historically only ran on menu OPEN (open-state-changed) or
+  // _clearClocks() -- so toggling e.g. "24 hours format" while the menu
+  // was already open left every visible row showing its stale pre-toggle
+  // text until the menu was closed and reopened. This still matters with
+  // the date feature removed: format24/showCity/showTimezone all still
+  // change a row's rendered TEXT (see _computeEntrySegments()'s `full`
+  // branch), so a live-open menu still needs this refresh on every
+  // toggle, not just format24.
   //
   // FIX, scoped to the actual class of bug (every config switch, not just
-  // "Show date" -- see _addConfigSwitch()'s 'toggled' handler, the single
-  // call site for this method): refresh this._state's cached item.label
-  // (this._updateTimeLabels(), cheap: one _getLabelForTimezone() call per
+  // whichever one first surfaced it -- see _addConfigSwitch()'s 'toggled'
+  // handler, the single call site for this method): refresh this._state's
+  // cached item.label (this._updateTimeLabels(), cheap: one
+  // _getLabelForTimezone() call per
   // zone, same work _updateMenu() already did) and then update each
   // CURRENTLY-BUILT active row's own St.Label text IN PLACE, rather than
   // calling the heavier _updateActiveMenu() (which removeAll()s and

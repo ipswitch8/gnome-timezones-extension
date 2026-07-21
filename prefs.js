@@ -186,48 +186,37 @@ export default class TimezonesPrefs extends ExtensionPreferences {
     });
     group.add(separatorRow);
 
-    // --- Date: "Show date" toggle + global date format ---
+    // --- Hover-popup feature: single toggle for a dates-only hover popup ---
     //
-    // Unlike every other control in this group (which reads/writes
-    // 'formatting-defaults'/'separator'), "Show date" is a genuine
-    // 'config' a{sb} boolean -- the exact same key/shape the popup menu's
-    // own switches (extension.js's _addConfigSwitch()) read and write, so
-    // both surfaces stay in sync via the SAME gsetting, same as every
+    // A genuine 'config' a{sb} boolean -- the exact same key/shape the
+    // popup menu's own switch (extension.js's `_addConfigSwitch({ label:
+    // 'Show dates on hover', name: 'showHoverPopup' })`) reads and writes,
+    // so both surfaces stay in sync via the SAME gsetting, same as every
     // other dual-surface control in this file. Read-modify-write here
     // mirrors readFormattingMap()/writeFormattingMap() below: read the
     // whole map, touch only the one field being changed, write the whole
     // map back -- never clobbering format24/showCity/showTimezone/
     // hideSystemClock/showSeparator, none of which this file otherwise
     // touches at all.
+    //
+    // The key is still named `showHoverPopup` (not renamed to e.g.
+    // `showHoverDates`) purely to avoid orphaning an already-saved user
+    // value in an existing dconf database -- only the user-visible
+    // title/subtitle below changed to describe the simplified,
+    // dates-only behavior. OFF by default (feature requirement).
     const readConfig = () => settings.get_value('config').deep_unpack();
     const writeConfigField = (field, value) => {
       settings.set_value('config', new GLib.Variant('a{sb}', { ...readConfig(), [field]: value }));
     };
 
-    const showDateRow = this._buildBoldRow({
-      title: 'Show date',
-      name: 'tzprefs-show-date',
-      active: Boolean(readConfig().showDate),
-      onChange: (v) => writeConfigField('showDate', v),
-    });
-    showDateRow.subtitle = 'Adds each clock\'s current date to its popup-menu row (not the top-bar panel)';
-    group.add(showDateRow);
-
-    // Hover-popup feature: another genuine 'config' a{sb} boolean, exactly
-    // the same read-modify-write shape as "Show date" immediately above --
-    // same 'config' key, same popup-menu-side switch counterpart
-    // (extension.js's `_addConfigSwitch({ label: 'Show all zones on
-    // hover', name: 'showHoverPopup' })`), same live two-way sync via the
-    // existing 'changed' gsettings listener in extension.js. OFF by
-    // default (feature requirement).
     const showHoverPopupRow = this._buildBoldRow({
-      title: 'Show all zones on hover',
+      title: 'Show dates on hover',
       name: 'tzprefs-show-hover-popup',
       active: Boolean(readConfig().showHoverPopup),
       onChange: (v) => writeConfigField('showHoverPopup', v),
     });
     showHoverPopupRow.subtitle =
-      'Hovering the top-bar clock shows every active timezone, in panel order, each with its time and date';
+      'Hovering the top-bar clock shows a popup with the current date for every active timezone, in panel order';
     group.add(showHoverPopupRow);
 
     // Live preview text for `value` against "right now", used by both the
