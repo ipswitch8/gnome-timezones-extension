@@ -40,7 +40,7 @@
 //
 // `<control>` is one of: global-size, global-color, global-bold-city,
 // global-bold-time, global-bold-zone, separator, size, color, bold-city,
-// bold-time, bold-zone, clear, expander, show-date, date-format,
+// bold-time, bold-zone, clear, expander, show-hover-popup, date-format,
 // date-format-custom.
 //
 // `<zoneId>` (per-zone widgets only) is the zone's IANA id with every '/'
